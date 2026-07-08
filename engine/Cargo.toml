@@ -1,0 +1,19 @@
+[package]
+name = "edr-engine"
+version = "0.1.0"
+edition = "2021"
+description = "Inline behavioral prevention engine — userland detection core (partial-order matching)"
+
+# Zero external dependencies on purpose: the hot-path detection core must be
+# auditable and build offline. Dataset parsing uses a tiny hand-written lexer.
+
+[[bin]]
+name = "edr-replay"
+path = "src/main.rs"
+
+[lib]
+name = "edr_engine"
+path = "src/lib.rs"
+
+[profile.release]
+opt-level = 3

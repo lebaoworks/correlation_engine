@@ -1,0 +1,8 @@
+# Same chain, middle group REORDERED: vssadmin (T1490) BEFORE discovery (T1083).
+# Partial-order matching must still detect and DENY — order is a bonus, not a gate.
+ts=1000 op=exec  actor=100.1 object=proc:200.5  image=C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe cmd="-enc SQBFAFgA"
+ts=1500 op=exec  actor=200.5 object=proc:300.10 image=C:\Windows\System32\vssadmin.exe cmd="delete shadows /all /quiet"
+ts=2000 op=open  actor=200.5 object=file:DIR_documents enum=1
+ts=2100 op=open  actor=200.5 object=file:DIR_pictures  enum=1
+ts=2500 op=write actor=200.5 object=file:DOC1 dir=C:\Users\a\Documents entropy=0.96 pe=0
+ts=2600 op=write actor=200.5 object=file:DOC2 dir=C:\Users\a\Pictures  entropy=0.95 pe=0

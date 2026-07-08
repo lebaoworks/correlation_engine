@@ -1,0 +1,11 @@
+# Rust build artifacts
+/engine/target/
+**/*.rs.bk
+
+# scratch / editor
+.DS_Store
+*.swp
+
+# Bài báo tham chiếu (bản quyền học thuật) — không đẩy lên repo công khai.
+# Muốn kèm thì xoá dòng dưới rồi `git add *.pdf`.
+*.pdf

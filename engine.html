@@ -1,0 +1,576 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Inline Behavioral Prevention Engine — Thuật toán</title>
+<style>
+  :root{
+    --bg:#0a0e14; --bg2:#0e131c; --panel:#141b26; --panel2:#1a2331;
+    --line:#25303f; --line2:#324054;
+    --ink:#e9eef5; --muted:#8b9aad; --dim:#5c6b7e;
+    --accent:#8b7cff; --accent-dim:#5b52a8; --cyan:#38bdf8;
+    --allow:#34d399; --arm:#fbbf24; --deny:#fb6f84;
+    --mono: ui-monospace,"Cascadia Code","JetBrains Mono","SFMono-Regular",Consolas,monospace;
+    --sans: system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0; background:
+      radial-gradient(1200px 700px at 78% -10%, #16203010 0%, transparent 55%),
+      radial-gradient(900px 600px at 0% 110%, #1a163010 0%, transparent 50%),
+      var(--bg);
+    color:var(--ink); font-family:var(--sans);
+    display:flex; align-items:center; justify-content:center;
+    overflow:hidden; -webkit-font-smoothing:antialiased;
+  }
+
+  /* ---- stage ------------------------------------------------------------ */
+  .deck{width:100%; height:100%; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:1.4vmin;}
+  .stage{
+    position:relative; width:min(94vw, calc(88vh * 16/9)); aspect-ratio:16/9;
+    container-type:inline-size;
+    background:linear-gradient(180deg,var(--bg2),var(--panel) 140%);
+    border:1px solid var(--line); border-radius:1.4cqi;
+    box-shadow:0 3cqi 8cqi -3cqi #000, inset 0 0 0 1px #ffffff06;
+    overflow:hidden;
+  }
+  /* scanline / grid ambiance */
+  .stage::before{
+    content:""; position:absolute; inset:0; pointer-events:none; opacity:.35;
+    background:
+      linear-gradient(#ffffff05 1px,transparent 1px) 0 0/100% 4.2cqi,
+      linear-gradient(90deg,#ffffff04 1px,transparent 1px) 0 0/4.2cqi 100%;
+    mask:radial-gradient(120% 120% at 50% 40%,#000 55%,transparent 100%);
+  }
+
+  .topbar{position:absolute; top:0; left:0; right:0; height:6.4cqi; display:flex; align-items:center; justify-content:space-between; padding:0 2.6cqi; z-index:6;}
+  .brand{display:flex; align-items:center; gap:1.2cqi; font-family:var(--mono); font-size:1.55cqi; letter-spacing:.14em; color:var(--muted); text-transform:uppercase;}
+  .brand .dot{width:1.1cqi;height:1.1cqi;border-radius:50%;background:var(--accent);box-shadow:0 0 2cqi var(--accent);animation:beat 2.4s ease-in-out infinite;}
+  @keyframes beat{0%,100%{opacity:.55;transform:scale(.9)}50%{opacity:1;transform:scale(1.15)}}
+  .counter{font-family:var(--mono); font-size:1.5cqi; color:var(--dim); letter-spacing:.08em;}
+  .counter b{color:var(--ink)}
+
+  /* ---- slides ----------------------------------------------------------- */
+  .slide{position:absolute; inset:6.4cqi 0 5.4cqi 0; padding:1.2cqi 5cqi; z-index:2;
+    display:flex; flex-direction:column; justify-content:center;
+    opacity:0; visibility:hidden; transform:translateY(1.4cqi);
+    transition:opacity .5s ease, transform .5s ease, visibility .5s;}
+  .slide.active{opacity:1; visibility:visible; transform:none;}
+  .eyebrow{font-family:var(--mono); font-size:1.5cqi; letter-spacing:.22em; text-transform:uppercase; color:var(--accent); display:flex; gap:1cqi; align-items:center;}
+  .eyebrow::before{content:""; width:2.6cqi; height:1px; background:var(--accent); opacity:.7;}
+  h1{font-family:var(--mono); font-weight:650; font-size:6.6cqi; line-height:1.02; letter-spacing:-.01em; margin:.5cqi 0 0; text-wrap:balance;}
+  h2{font-family:var(--mono); font-weight:600; font-size:3.7cqi; line-height:1.05; letter-spacing:-.01em; margin:.6cqi 0 .2cqi; text-wrap:balance;}
+  p.lead{font-size:2.15cqi; line-height:1.5; color:#cdd7e2; max-width:62cqi; margin:.8cqi 0;}
+  .muted{color:var(--muted)} .mono{font-family:var(--mono)}
+
+  /* footer rail */
+  .rail{position:absolute; bottom:0; left:0; right:0; height:5.4cqi; z-index:6;
+    display:flex; align-items:center; justify-content:space-between; padding:0 2.6cqi; border-top:1px solid var(--line);
+    background:linear-gradient(0deg,#0000004d,transparent);}
+  .dots{display:flex; gap:1.1cqi; align-items:center}
+  .dots button{all:unset; cursor:pointer; width:1.15cqi; height:1.15cqi; border-radius:50%; background:var(--line2); transition:.3s; outline-offset:2px}
+  .dots button:focus-visible{outline:2px solid var(--accent)}
+  .dots button.on{background:var(--accent); box-shadow:0 0 1.6cqi var(--accent); transform:scale(1.2)}
+  .dots button.seen{background:var(--accent-dim)}
+  .hint{font-family:var(--mono); font-size:1.4cqi; color:var(--dim); letter-spacing:.05em; display:flex; gap:1.4cqi; align-items:center}
+  .key{border:1px solid var(--line2); border-radius:.5cqi; padding:.15cqi .8cqi; color:var(--muted)}
+  .nav{display:flex; gap:.8cqi}
+  .nav button{all:unset; cursor:pointer; font-family:var(--mono); font-size:1.5cqi; color:var(--muted); border:1px solid var(--line2); border-radius:.7cqi; padding:.4cqi 1.4cqi; transition:.2s; outline-offset:2px}
+  .nav button:hover{color:var(--ink); border-color:var(--accent); background:#8b7cff14}
+  .nav button:focus-visible{outline:2px solid var(--accent)}
+
+  /* substep progress under topbar */
+  .subprog{position:absolute; top:6.4cqi; left:0; height:.35cqi; background:var(--accent); width:0; z-index:5; transition:width .45s cubic-bezier(.4,0,.2,1); box-shadow:0 0 1.4cqi var(--accent)}
+
+  /* ---- reusable bits ---------------------------------------------------- */
+  .chip{font-family:var(--mono); font-size:1.7cqi; border:1px solid var(--line2); border-radius:.8cqi; padding:.7cqi 1.3cqi; color:var(--muted); background:var(--panel2); display:inline-flex; align-items:center; gap:.8cqi; transition:.35s}
+  .badge{font-family:var(--mono); font-size:1.4cqi; letter-spacing:.08em; padding:.3cqi 1cqi; border-radius:.5cqi; text-transform:uppercase}
+  .b-allow{color:var(--allow); background:#34d3991a; border:1px solid #34d39955}
+  .b-arm{color:var(--arm); background:#fbbf241a; border:1px solid #fbbf2455}
+  .b-deny{color:var(--deny); background:#fb6f841a; border:1px solid #fb6f8455}
+
+  .grid2{display:grid; grid-template-columns:1fr 1fr; gap:3cqi; align-items:center}
+  .card{background:var(--panel); border:1px solid var(--line); border-radius:1.2cqi; padding:2.2cqi}
+  .card h3{font-family:var(--mono); font-size:1.9cqi; margin:0 0 1cqi; color:var(--ink); font-weight:600}
+
+  /* fade-in step items */
+  [data-step]{opacity:.18; filter:saturate(.4); transition:opacity .45s ease, filter .45s ease, transform .45s ease}
+  [data-step].on{opacity:1; filter:none}
+
+  /* ===== architecture round trip ===== */
+  .arch{display:grid; grid-template-rows:1fr 1fr; gap:2.4cqi; height:100%; padding-top:1cqi}
+  .zone{position:relative; border:1px solid var(--line); border-radius:1.2cqi; padding:1.6cqi 2.2cqi; display:flex; flex-direction:column; gap:1.2cqi}
+  .zone .ztag{position:absolute; top:-1.4cqi; left:2cqi; font-family:var(--mono); font-size:1.4cqi; letter-spacing:.18em; text-transform:uppercase; background:var(--bg2); padding:0 1cqi; color:var(--muted)}
+  .zone.kernel{background:linear-gradient(180deg,#1a1420,#141b26); border-color:#3a2b46}
+  .zone.kernel .ztag{color:#c9a2ff}
+  .zone.user{background:linear-gradient(180deg,#101a24,#141b26); border-color:#26414f}
+  .zone.user .ztag{color:var(--cyan)}
+  .row{display:flex; gap:1.4cqi; align-items:center; flex-wrap:wrap}
+  .pill{font-family:var(--mono); font-size:1.55cqi; padding:.7cqi 1.2cqi; border-radius:.7cqi; background:var(--panel2); border:1px solid var(--line2); color:var(--muted)}
+  .packet{position:absolute; width:2.2cqi; height:2.2cqi; border-radius:50%; background:var(--cyan); box-shadow:0 0 2.4cqi var(--cyan); left:14cqi; top:50%; z-index:4;}
+  .packet.run{animation:trip 4.2s ease-in-out infinite}
+  @keyframes trip{
+    0%{top:74cqi; left:12cqi; background:var(--cyan); box-shadow:0 0 2.4cqi var(--cyan)}
+    35%{top:30cqi; left:12cqi; background:var(--cyan)}
+    50%{top:24cqi; left:64cqi; background:var(--accent)}
+    65%{top:30cqi; left:78cqi; background:var(--arm)}
+    82%{top:74cqi; left:78cqi; background:var(--deny)}
+    100%{top:74cqi; left:78cqi; background:var(--deny); opacity:.15}
+  }
+
+  /* ===== pipeline ===== */
+  .pipe{display:flex; align-items:stretch; gap:1.2cqi; justify-content:center; margin-top:2cqi}
+  .stagebox{flex:1; background:var(--panel); border:1px solid var(--line); border-radius:1cqi; padding:1.6cqi 1cqi; text-align:center; position:relative; transition:.4s}
+  .stagebox .n{font-family:var(--mono); font-size:1.3cqi; color:var(--dim)}
+  .stagebox .t{font-family:var(--mono); font-size:1.75cqi; margin-top:.6cqi; color:var(--muted); font-weight:600; transition:.4s}
+  .stagebox .d{font-size:1.35cqi; color:var(--dim); margin-top:.5cqi; line-height:1.35}
+  .stagebox.on{border-color:var(--accent); background:#8b7cff12; box-shadow:0 0 3cqi -1cqi var(--accent)}
+  .stagebox.on .t{color:var(--accent)}
+  .arrow{align-self:center; color:var(--line2); font-size:2.2cqi; font-family:var(--mono)}
+
+  /* ===== DSU storyline ===== */
+  .dsu{position:relative; height:44cqi; margin-top:1cqi}
+  .node{position:absolute; width:15cqi; height:15cqi; border-radius:50%; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:.4cqi; border:2px solid var(--line2); background:var(--panel); transition:.6s; font-family:var(--mono)}
+  .node .k{font-size:2.4cqi; font-weight:700; color:var(--ink)}
+  .node .s{font-size:1.35cqi; color:var(--dim)}
+  .node.sid{border-color:var(--accent); background:#8b7cff18; box-shadow:0 0 4cqi -1cqi var(--accent)}
+  .node.sid .s{color:var(--accent)}
+  #nP{left:5cqi; top:14cqi} #nX{left:37cqi; top:14cqi} #nQ{left:69cqi; top:14cqi}
+  .edge{position:absolute; height:.5cqi; background:linear-gradient(90deg,var(--line2),var(--line2)); transform-origin:left center; z-index:0; opacity:0; transition:.6s}
+  .edge.on{opacity:1; background:linear-gradient(90deg,var(--accent),var(--accent))}
+  .edge .lbl{position:absolute; top:-2.4cqi; left:50%; transform:translateX(-50%); font-family:var(--mono); font-size:1.4cqi; color:var(--muted); white-space:nowrap}
+  #eXP{left:20cqi; top:21cqi; width:17cqi} #eQX{left:52cqi; top:21cqi; width:17cqi}
+
+  /* ===== bitmask matcher ===== */
+  .bits-wrap{display:grid; grid-template-columns:1.1fr .9fr; gap:3cqi; margin-top:1cqi; align-items:start}
+  .steps-col{display:flex; flex-direction:column; gap:1.3cqi}
+  .stepchip{display:flex; align-items:center; gap:1.4cqi; background:var(--panel); border:1px solid var(--line); border-radius:1cqi; padding:1.2cqi 1.6cqi; transition:.4s; position:relative}
+  .stepchip .bitbox{width:3.4cqi; height:3.4cqi; border-radius:.7cqi; border:1.5px solid var(--line2); display:flex; align-items:center; justify-content:center; font-family:var(--mono); font-size:1.9cqi; color:var(--dim); transition:.4s; flex:none}
+  .stepchip .meta{display:flex; flex-direction:column; gap:.2cqi}
+  .stepchip .ttp{font-family:var(--mono); font-size:1.9cqi; color:var(--ink); font-weight:600}
+  .stepchip .pre{font-family:var(--mono); font-size:1.35cqi; color:var(--dim)}
+  .stepchip.set{border-color:var(--allow); background:#34d3990e}
+  .stepchip.set .bitbox{border-color:var(--allow); background:var(--allow); color:#06281c}
+  .stepchip.set .pre{color:var(--allow)}
+  .stepchip.reject{animation:shake .5s ease}
+  .stepchip.reject .bitbox{border-color:var(--deny); color:var(--deny)}
+  @keyframes shake{0%,100%{transform:translateX(0)}20%{transform:translateX(-1.4cqi)}40%{transform:translateX(1.2cqi)}60%{transform:translateX(-.8cqi)}80%{transform:translateX(.5cqi)}}
+  .stepchip.accept{box-shadow:0 0 0 2px var(--allow), 0 0 4cqi -1cqi var(--allow)}
+
+  .reg{background:#0c1119; border:1px solid var(--line); border-radius:1cqi; padding:1.8cqi}
+  .reg h4{font-family:var(--mono); font-size:1.5cqi; letter-spacing:.1em; text-transform:uppercase; color:var(--muted); margin:0 0 1.4cqi}
+  .cells{display:flex; gap:1cqi; justify-content:space-between}
+  .cell{flex:1; aspect-ratio:1; border-radius:.8cqi; border:1.5px solid var(--line2); display:flex; flex-direction:column; align-items:center; justify-content:center; font-family:var(--mono); background:var(--panel2); transition:.4s}
+  .cell .bv{font-size:3.2cqi; font-weight:700; color:var(--dim)}
+  .cell .bn{font-size:1.2cqi; color:var(--dim); margin-top:.3cqi}
+  .cell.one{border-color:var(--allow); background:#34d39916}
+  .cell.one .bv{color:var(--allow)}
+  .maskline{font-family:var(--mono); font-size:1.9cqi; margin-top:1.6cqi; color:var(--muted); text-align:center}
+  .maskline b{color:var(--ink)}
+  .log{margin-top:1.6cqi; font-family:var(--mono); font-size:1.5cqi; min-height:9cqi; display:flex; flex-direction:column; gap:.7cqi}
+  .logline{opacity:0; transform:translateX(-1cqi); transition:.4s; color:var(--muted)}
+  .logline.on{opacity:1; transform:none}
+  .logline .ok{color:var(--allow)} .logline .no{color:var(--deny)} .logline .arm{color:var(--arm)}
+
+  /* ===== scoring meter ===== */
+  .score-wrap{display:grid; grid-template-columns:.7fr 1.3fr; gap:4cqi; margin-top:1cqi; align-items:end; height:46cqi}
+  .meter{position:relative; width:100%; height:100%; background:var(--panel); border:1px solid var(--line); border-radius:1.2cqi; overflow:hidden; display:flex; align-items:flex-end}
+  .fill{width:100%; height:0%; background:linear-gradient(0deg,var(--accent),var(--cyan)); transition:height .7s cubic-bezier(.4,0,.2,1); box-shadow:0 0 4cqi -1cqi var(--accent)}
+  .fill.warn{background:linear-gradient(0deg,var(--arm),#f59e0b)}
+  .fill.crit{background:linear-gradient(0deg,var(--deny),var(--arm))}
+  .thr{position:absolute; left:0; right:0; height:0; border-top:1.5px dashed; display:flex; align-items:center}
+  .thr span{font-family:var(--mono); font-size:1.35cqi; padding:0 1cqi; background:var(--panel); position:absolute; right:1cqi; top:-1cqi}
+  .thr.alert{border-color:var(--arm); bottom:52%} .thr.alert span{color:var(--arm)}
+  .thr.block{border-color:var(--deny); bottom:78%} .thr.block span{color:var(--deny)}
+  .scoreval{position:absolute; top:1.4cqi; left:0; right:0; text-align:center; font-family:var(--mono); font-size:2.4cqi; color:var(--ink)}
+  .score-side{display:flex; flex-direction:column; gap:1.6cqi}
+  .evt{font-family:var(--mono); font-size:1.7cqi; padding:1.1cqi 1.5cqi; border:1px solid var(--line); border-radius:.9cqi; background:var(--panel); color:var(--muted); display:flex; justify-content:space-between; align-items:center; transition:.4s}
+  .evt.on{border-color:var(--accent); color:var(--ink)}
+  .verdict-stamp{margin-top:1cqi; font-family:var(--mono); font-weight:700; font-size:3.4cqi; letter-spacing:.1em; text-align:center; padding:1.4cqi; border-radius:1cqi; opacity:0; transform:scale(1.3); transition:.5s cubic-bezier(.34,1.56,.64,1)}
+  .verdict-stamp.on{opacity:1; transform:scale(1)}
+
+  /* ===== false positive ===== */
+  .fp{display:grid; grid-template-columns:1fr 1fr; gap:3cqi; margin-top:1cqi}
+  .lane{background:var(--panel); border:1px solid var(--line); border-radius:1.2cqi; padding:2cqi; display:flex; flex-direction:column; gap:1.6cqi}
+  .lane .lh{font-family:var(--mono); font-size:1.9cqi; font-weight:600}
+  .fx{display:flex; align-items:center; gap:1.4cqi; font-family:var(--mono); font-size:1.75cqi}
+  .token{font-family:var(--mono); font-weight:700; padding:.5cqi 1.2cqi; border-radius:.6cqi; border:1.5px solid var(--accent); color:var(--accent); background:#8b7cff12}
+  .token.y{border-color:var(--cyan); color:var(--cyan); background:#38bdf812}
+  .cmp{font-family:var(--mono); font-size:2.6cqi; text-align:center; padding:1cqi; opacity:0; transition:.5s}
+  .cmp.on{opacity:1}
+  .cmp.match{color:var(--allow)} .cmp.reject{color:var(--deny)}
+  .lane .out{margin-top:auto; font-family:var(--mono); font-size:1.7cqi; opacity:0; transition:.5s}
+  .lane .out.on{opacity:1}
+
+  /* ===== timeline ===== */
+  .tl{position:relative; margin-top:3cqi; padding-left:2cqi}
+  .track{position:absolute; left:2cqi; top:1cqi; bottom:1cqi; width:.4cqi; background:var(--line2)}
+  .tevt{position:relative; display:grid; grid-template-columns:auto 1fr auto; gap:2cqi; align-items:center; padding:1cqi 0 1cqi 3cqi; opacity:.16; transition:.5s}
+  .tevt.on{opacity:1}
+  .tevt::before{content:""; position:absolute; left:1.15cqi; top:50%; transform:translateY(-50%); width:2cqi; height:2cqi; border-radius:50%; background:var(--line2); border:2px solid var(--bg); transition:.4s}
+  .tevt.on::before{background:var(--accent); box-shadow:0 0 2cqi var(--accent)}
+  .tevt.deny::before{background:var(--deny); box-shadow:0 0 2cqi var(--deny)}
+  .tevt.arm::before{background:var(--arm); box-shadow:0 0 2cqi var(--arm)}
+  .tevt .tt{font-family:var(--mono); font-size:1.55cqi; color:var(--dim)}
+  .tevt .desc{font-family:var(--mono); font-size:1.75cqi; color:var(--ink)}
+  .tevt .tag{font-family:var(--mono); font-size:1.45cqi; color:var(--muted)}
+
+  /* outro */
+  .guarantees{display:grid; grid-template-columns:1fr 1fr; gap:1.8cqi; margin-top:2cqi}
+  .g{display:flex; gap:1.4cqi; align-items:flex-start; background:var(--panel); border:1px solid var(--line); border-left:3px solid var(--accent); border-radius:.9cqi; padding:1.5cqi 1.8cqi}
+  .g .gi{font-family:var(--mono); color:var(--accent); font-size:2cqi; flex:none}
+  .g .gt{font-size:1.75cqi; line-height:1.4; color:#cdd7e2}
+  .g .gt b{color:var(--ink); font-family:var(--mono)}
+
+  @media (prefers-reduced-motion: reduce){
+    *{animation-duration:.001s !important; transition-duration:.12s !important}
+    .packet.run{animation:none; top:50%}
+  }
+  @media (max-width:640px){ .hint .nokey{display:none} }
+</style>
+</head>
+<body>
+<div class="deck">
+  <div class="stage" id="stage" tabindex="0" aria-label="Slide deck: thuật toán engine">
+    <div class="topbar">
+      <div class="brand"><span class="dot"></span> EDR · Inline Prevention Engine</div>
+      <div class="counter"><b id="cur">01</b> / <span id="tot">10</span></div>
+    </div>
+    <div class="subprog" id="subprog"></div>
+
+    <!-- 1 · TITLE -->
+    <section class="slide" data-steps="0">
+      <div class="eyebrow">Detection Core · Thuật toán</div>
+      <h1>Chặn chuỗi tấn công<br>ngay khi nó đang xảy ra.</h1>
+      <p class="lead">Một engine chạy trên endpoint: thu telemetry ở kernel, ghép nhiều hành vi thành <span class="mono" style="color:var(--accent)">một chuỗi tấn công</span>, và <b>ngăn chặn inline</b> — không chỉ cảnh báo. Mỗi event xử lý trong thời gian <span class="mono" style="color:var(--cyan)">O(1)</span>.</p>
+      <div class="row" style="margin-top:1.4cqi">
+        <span class="chip">tư duy HOLMES</span>
+        <span class="chip">automata thay graph-matching</span>
+        <span class="chip">partial-order · bitmask</span>
+        <span class="chip">Windows-first</span>
+      </div>
+    </section>
+
+    <!-- 2 · TENSION -->
+    <section class="slide" data-steps="2">
+      <div class="eyebrow">Mâu thuẫn cốt lõi</div>
+      <h2>Correlation cần thời gian.<br>Chặn phải quyết định ngay.</h2>
+      <div class="grid2" style="margin-top:2cqi">
+        <div class="card" data-step="1">
+          <h3 style="color:var(--deny)">Vấn đề</h3>
+          <p class="lead" style="font-size:1.9cqi; margin:0">Nhận diện một cuộc tấn công cần <b>nhiều event theo thời gian</b>. Nhưng để chặn, kernel phải trả lời <b>allow/deny</b> đồng bộ trong micro-giây — không kịp chờ ghép cả chuỗi.</p>
+        </div>
+        <div class="card" data-step="2" style="border-color:var(--accent)">
+          <h3 style="color:var(--accent)">Cách giải</h3>
+          <p class="lead" style="font-size:1.9cqi; margin:0">Duy trì trạng thái chuỗi ở userland. Khi đủ tin cậy → <b>vũ trang (arm)</b> kernel để nó tự <b>deny hành động enforcing kế tiếp</b> (điểm nghẽn: mã hoá / đọc LSASS / exfil). Chặn tại chỗ, không hồi tố.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- 3 · ARCHITECTURE -->
+    <section class="slide" data-steps="0">
+      <div class="eyebrow">Kiến trúc</div>
+      <h2>Kernel là cảm biến &amp; tay chặn. Userland là bộ não.</h2>
+      <div class="arch">
+        <div class="zone user">
+          <div class="ztag">Userland · bộ não stateful</div>
+          <div class="row">
+            <span class="pill">normalize</span><span class="pill" style="border-color:var(--accent);color:var(--accent)">storyline graph</span>
+            <span class="pill" style="border-color:var(--accent);color:var(--accent)">automata O(1)</span><span class="pill">kill-chain score</span>
+            <span class="pill" style="border-color:var(--arm);color:var(--arm)">policy → ARM</span>
+          </div>
+        </div>
+        <div class="zone kernel">
+          <div class="ztag">Kernel · cảm biến + điểm thực thi</div>
+          <div class="row">
+            <span class="pill">minifilter / ETW</span><span class="pill">lọc theo technique</span>
+            <span class="pill" style="border-color:var(--cyan);color:var(--cyan)">candidate TTP ↑</span>
+            <span class="pill" style="border-color:var(--deny);color:var(--deny)">ALLOW / DENY</span>
+          </div>
+        </div>
+        <div class="packet run" title="một event đi lên, verdict đi xuống"></div>
+      </div>
+      <p class="lead muted" style="font-size:1.6cqi; margin-top:1cqi">Một event: sensor kernel → đẩy lên bộ não → chấm điểm → verdict/arm đi xuống → kernel thực thi. Correlation graph <b>không</b> nằm trong kernel.</p>
+    </section>
+
+    <!-- 4 · PIPELINE -->
+    <section class="slide" data-steps="6">
+      <div class="eyebrow">Vòng lặp mỗi event · O(1)</div>
+      <h2>ON_EVENT — sáu bước bounded</h2>
+      <div class="pipe">
+        <div class="stagebox" data-box="1"><div class="n">01</div><div class="t">RESOLVE</div><div class="d">phân giải node theo identity</div></div>
+        <div class="arrow">›</div>
+        <div class="stagebox" data-box="2"><div class="n">02</div><div class="t">UNIFY</div><div class="d">hợp nhất storyline (DSU)</div></div>
+        <div class="arrow">›</div>
+        <div class="stagebox" data-box="3"><div class="n">03</div><div class="t">EDGE</div><div class="d">ghi cạnh nhân-quả</div></div>
+        <div class="arrow">›</div>
+        <div class="stagebox" data-box="4"><div class="n">04</div><div class="t">TAG_TTP</div><div class="d">gán technique đầy đủ</div></div>
+        <div class="arrow">›</div>
+        <div class="stagebox" data-box="5"><div class="n">05</div><div class="t">ADVANCE</div><div class="d">đẩy automata + chấm điểm</div></div>
+        <div class="arrow">›</div>
+        <div class="stagebox" data-box="6"><div class="n">06</div><div class="t">DECIDE</div><div class="d">verdict inline cho kernel</div></div>
+      </div>
+      <p class="lead muted" style="font-size:1.7cqi; margin-top:3cqi; text-align:center">Không bước nào phụ thuộc kích thước toàn graph. Mọi tra cứu là hash/bitwise → <b class="mono" style="color:var(--accent)">O(1) amortized / event</b>.</p>
+    </section>
+
+    <!-- 5 · STORYLINE DSU -->
+    <section class="slide" data-steps="3">
+      <div class="eyebrow">Storyline · Union-Find</div>
+      <h2>Chỉ cạnh <span style="color:var(--accent)">nhân-quả</span> mới hợp nhất chuỗi</h2>
+      <div class="dsu">
+        <div class="edge" id="eXP"><span class="lbl">write (causal)</span></div>
+        <div class="edge" id="eQX"><span class="lbl">exec (causal)</span></div>
+        <div class="node" id="nP"><span class="k">P</span><span class="s">process</span></div>
+        <div class="node" id="nX"><span class="k">X</span><span class="s">file dropped</span></div>
+        <div class="node" id="nQ"><span class="k">Q</span><span class="s">process</span></div>
+      </div>
+      <p class="lead muted" style="font-size:1.7cqi; margin-top:.5cqi"><span data-step="1">P <b>ghi</b> file X → X kế thừa storyline của P.</span> <span data-step="2">X bị <b>exec</b> → Q nối tiếp cùng chuỗi.</span> <span data-step="3" style="color:var(--accent)"><b>Một storyline S1.</b> read/open/connect chỉ ghi cạnh — không merge (chống bùng nổ phụ thuộc).</span></p>
+    </section>
+
+    <!-- 6 · BITMASK MATCHER -->
+    <section class="slide" data-steps="5">
+      <div class="eyebrow">Lõi · Partial-order matching</div>
+      <h2>Thứ tự bộ phận, tiến độ là <span style="color:var(--allow)">bitmask</span></h2>
+      <div class="bits-wrap">
+        <div class="steps-col">
+          <div class="stepchip" id="sc0"><div class="bitbox">0</div><div class="meta"><span class="ttp">T1059 · exec interpreter</span><span class="pre">prereq { } — bước gốc</span></div></div>
+          <div class="stepchip" id="sc1"><div class="bitbox">1</div><div class="meta"><span class="ttp">T1490 · inhibit recovery</span><span class="pre">prereq { 0 }</span></div></div>
+          <div class="stepchip" id="sc2"><div class="bitbox">2</div><div class="meta"><span class="ttp">T1083 · file discovery</span><span class="pre">prereq { 0 }</span></div></div>
+          <div class="stepchip" id="sc3"><div class="bitbox">3</div><div class="meta"><span class="ttp">T1486 · encrypt (block_at)</span><span class="pre">prereq { 1, 2 }</span></div></div>
+        </div>
+        <div class="reg">
+          <h4>completed_mask</h4>
+          <div class="cells">
+            <div class="cell" id="ce3"><span class="bv">0</span><span class="bn">bit3</span></div>
+            <div class="cell" id="ce2"><span class="bv">0</span><span class="bn">bit2</span></div>
+            <div class="cell" id="ce1"><span class="bv">0</span><span class="bn">bit1</span></div>
+            <div class="cell" id="ce0"><span class="bv">0</span><span class="bn">bit0</span></div>
+          </div>
+          <div class="maskline">enable ⟺ <b>(prereq &amp; mask) == prereq</b></div>
+          <div class="log" id="bitlog">
+            <div class="logline" data-l="1">→ T1059 · prereq{} <span class="ok">✓ set bit0</span></div>
+            <div class="logline" data-l="2">→ T1486 đến sớm · prereq{1,2} <span class="no">✗ IGNORE (chuỗi không vỡ)</span></div>
+            <div class="logline" data-l="3">→ T1083 · prereq{0} <span class="ok">✓ set bit2</span></div>
+            <div class="logline" data-l="4">→ T1490 · prereq{0} <span class="ok">✓ set bit1</span> — nhóm giữa tự do thứ tự</div>
+            <div class="logline" data-l="5">→ T1486 · prereq{1,2} <span class="ok">✓ set bit3 → ACCEPT</span></div>
+          </div>
+        </div>
+      </div>
+      <p class="lead muted" style="font-size:1.55cqi; margin-top:1cqi">"x phải đầu", "nhóm tự do", "mốc giữa" đều rơi ra từ <b class="mono">prereq_mask</b> — không liệt kê hoán vị. Mỗi event: 1 phép AND + 1 phép OR.</p>
+    </section>
+
+    <!-- 7 · SCORING -->
+    <section class="slide" data-steps="4">
+      <div class="eyebrow">Kill-chain scoring → ARM → BLOCK</div>
+      <h2>Đơn lẻ chỉ cảnh báo. Chuỗi phủ nhiều giai đoạn mới chặn.</h2>
+      <div class="score-wrap">
+        <div class="meter">
+          <div class="scoreval" id="sv">0.0</div>
+          <div class="thr alert"><span>θ_alert</span></div>
+          <div class="thr block"><span>θ_block</span></div>
+          <div class="fill" id="fill"></div>
+        </div>
+        <div class="score-side">
+          <div class="evt" data-e="1"><span>+ T1059 exec</span><span class="muted">score 4.1</span></div>
+          <div class="evt" data-e="2"><span>+ T1083 discovery</span><span class="muted">score 6.9 · <span style="color:var(--arm)">ALERT</span></span></div>
+          <div class="evt" data-e="3"><span>+ T1490 vssadmin</span><span class="muted">score 12.1 · <span style="color:var(--arm)">ARM</span></span></div>
+          <div class="evt" data-e="4"><span>write mã hoá đầu tiên</span><span class="muted">kernel đã armed</span></div>
+          <div class="verdict-stamp b-deny" id="stamp">DENY</div>
+        </div>
+      </div>
+      <p class="lead muted" style="font-size:1.55cqi; margin-top:.8cqi">Sau T1490 chuỗi vượt <b class="mono" style="color:var(--deny)">θ_block</b> nhưng T1486 chưa tới → <b>arm</b> kernel. Ngay write mã hoá đầu tiên bị <b style="color:var(--deny)">DENY</b> — không cần round-trip userland.</p>
+    </section>
+
+    <!-- 8 · FALSE POSITIVE / BINDING -->
+    <section class="slide" data-steps="2">
+      <div class="eyebrow">Chống false positive · Variable binding</div>
+      <h2>"Ghi X rồi chạy X" ≠ "ghi X rồi chạy Y"</h2>
+      <div class="fp">
+        <div class="lane">
+          <div class="lh" style="color:var(--allow)">Ghi X → chạy đúng X</div>
+          <div class="fx">write · bind <span class="token">dropped = F_x</span></div>
+          <div class="fx">exec · image = <span class="token">F_x</span></div>
+          <div class="cmp match" data-c="1">F_x == F_x ✓</div>
+          <div class="out" data-o="1"><span class="badge b-allow">SUSPECT · ALLOW</span> &nbsp;installer/updater làm y hệt → điểm thấp, không chặn.</div>
+        </div>
+        <div class="lane">
+          <div class="lh" style="color:var(--deny)">Ghi X → chạy Y khác</div>
+          <div class="fx">write · bind <span class="token">dropped = F_x</span></div>
+          <div class="fx">exec · image = <span class="token y">F_y</span></div>
+          <div class="cmp reject" data-c="2">F_y ≠ F_x ✗</div>
+          <div class="out" data-o="2"><span class="badge b-deny">BINDING REJECT</span> &nbsp;mẫu dropper <b>không</b> khớp → không FP.</div>
+        </div>
+      </div>
+      <p class="lead muted" style="font-size:1.55cqi; margin-top:1.4cqi">Binding so khớp theo <b class="mono" style="color:var(--accent)">file identity (FileId)</b>, không theo path → rename không né được, "chạy file khác" không dính oan.</p>
+    </section>
+
+    <!-- 9 · TIMELINE -->
+    <section class="slide" data-steps="6">
+      <div class="eyebrow">Chạy đầu-cuối · Ransomware</div>
+      <h2>Chặn đúng tại hành động mã hoá đầu tiên</h2>
+      <div class="tl">
+        <div class="track"></div>
+        <div class="tevt" data-t="1"><span class="tt">t=1000</span><span class="desc">exec powershell</span><span class="tag">TAG T1059 · seed automaton</span></div>
+        <div class="tevt" data-t="2"><span class="tt">t=1500</span><span class="desc">open · quét nhiều thư mục</span><span class="tag">TAG T1083 · completed 0101</span></div>
+        <div class="tevt arm" data-t="3"><span class="tt">t=2000</span><span class="desc">exec vssadmin delete shadows</span><span class="tag">TAG T1490 · <b style="color:var(--arm)">score≥θ_block → ARM</b></span></div>
+        <div class="tevt deny" data-t="4"><span class="tt">t=2500</span><span class="desc">write .docx · entropy↑</span><span class="tag"><b style="color:var(--deny)">DENY (kernel armed)</b></span></div>
+        <div class="tevt" data-t="5"><span class="tt">—</span><span class="desc">nhóm giữa tự do thứ tự</span><span class="tag">T1490 ⇄ T1083 đảo chiều vẫn chặn</span></div>
+        <div class="tevt" data-t="6"><span class="tt">✓</span><span class="desc">storyline graph dựng đầy đủ cho SOC</span><span class="tag">ACCEPT · BLOCK, không hồi tố</span></div>
+      </div>
+    </section>
+
+    <!-- 10 · OUTRO -->
+    <section class="slide" data-steps="0">
+      <div class="eyebrow">Vì sao thiết kế này chạy được inline</div>
+      <h2>Bốn đảm bảo</h2>
+      <div class="guarantees">
+        <div class="g"><span class="gi">◆</span><span class="gt"><b>O(1) / event</b> — bitmask + DSU + hash, không subgraph matching NP-hard trên hot path.</span></div>
+        <div class="g"><span class="gi">◆</span><span class="gt"><b>Chặn tại điểm nghẽn</b> — arm kernel, deny hành động enforcing kế tiếp, không hồi tố.</span></div>
+        <div class="g"><span class="gi">◆</span><span class="gt"><b>Thứ tự tự do</b> — partial-order DAG; thứ tự là điểm thưởng, không phải điều kiện.</span></div>
+        <div class="g"><span class="gi">◆</span><span class="gt"><b>FP có kiểm soát</b> — binding theo identity; ngưỡng bảo thủ; audit-only trước khi enforce.</span></div>
+      </div>
+      <p class="lead" style="margin-top:2cqi; font-size:1.8cqi">Prototype Rust + dataset: <span class="mono" style="color:var(--accent)">engine/</span> · rule khai báo ngoài <span class="mono" style="color:var(--cyan)">rules/*.rules</span> · <span class="mono">cargo test</span> ✓</p>
+    </section>
+
+    <div class="rail">
+      <div class="dots" id="dots" role="tablist" aria-label="Điều hướng slide"></div>
+      <div class="hint">
+        <span class="nokey"><span class="key">←</span> <span class="key">→</span> / <span class="key">Space</span> điều hướng</span>
+        <div class="nav"><button id="prev" aria-label="Slide trước">‹ Trước</button><button id="next" aria-label="Tiếp theo">Tiếp ›</button></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+  const stage = document.getElementById('stage');
+  const slides = [...document.querySelectorAll('.slide')];
+  const dotsWrap = document.getElementById('dots');
+  const subprog = document.getElementById('subprog');
+  const total = slides.length;
+  document.getElementById('tot').textContent = String(total).padStart(2,'0');
+
+  let idx = 0, step = 0;
+  const maxStep = s => parseInt(slides[s].dataset.steps || '0', 10);
+
+  // build dots
+  slides.forEach((_, i) => {
+    const b = document.createElement('button');
+    b.setAttribute('role','tab');
+    b.setAttribute('aria-label', 'Slide ' + (i+1));
+    b.addEventListener('click', () => { idx = i; step = 0; render(); });
+    dotsWrap.appendChild(b);
+  });
+  const dots = [...dotsWrap.children];
+
+  // per-slide step logic
+  function applySteps(slide, st){
+    // generic reveal
+    slide.querySelectorAll('[data-step]').forEach(el => {
+      el.classList.toggle('on', parseInt(el.dataset.step,10) <= st);
+    });
+
+    // pipeline
+    slide.querySelectorAll('[data-box]').forEach(el => {
+      el.classList.toggle('on', parseInt(el.dataset.box,10) <= st);
+    });
+
+    // DSU
+    if (slide.querySelector('#nP')){
+      const on1 = st>=1, on2 = st>=2;
+      slide.querySelector('#eXP').classList.toggle('on', on1);
+      slide.querySelector('#nX').classList.toggle('sid', on1);
+      slide.querySelector('#nP').classList.toggle('sid', on1);
+      slide.querySelector('#eQX').classList.toggle('on', on2);
+      slide.querySelector('#nQ').classList.toggle('sid', on2);
+    }
+
+    // bitmask matcher
+    if (slide.querySelector('#ce0')){
+      const b0 = st>=1, b2 = st>=3, b1 = st>=4, b3 = st>=5;
+      setCell(slide,'ce0',b0); setCell(slide,'ce1',b1); setCell(slide,'ce2',b2); setCell(slide,'ce3',b3);
+      slide.querySelector('#sc0').classList.toggle('set', b0);
+      slide.querySelector('#sc1').classList.toggle('set', b1);
+      slide.querySelector('#sc2').classList.toggle('set', b2);
+      slide.querySelector('#sc3').classList.toggle('set', b3);
+      slide.querySelector('#sc3').classList.toggle('reject', st===2);
+      slide.querySelector('#sc3').classList.toggle('accept', b3);
+      slide.querySelectorAll('.logline').forEach(l =>
+        l.classList.toggle('on', parseInt(l.dataset.l,10) <= st));
+    }
+
+    // scoring — heights tuned to cross the threshold lines (alert 52%, block 78%)
+    if (slide.querySelector('#fill')){
+      const H = {0:0,1:38,2:60,3:86,4:96}[st];
+      const V = {0:'0.0',1:'4.1',2:'6.9',3:'12.1',4:'18.8'}[st];
+      const fill = slide.querySelector('#fill');
+      fill.style.height = H + '%';
+      fill.classList.toggle('warn', st===2);
+      fill.classList.toggle('crit', st>=3);
+      slide.querySelector('#sv').textContent = V;
+      slide.querySelectorAll('[data-e]').forEach(el =>
+        el.classList.toggle('on', parseInt(el.dataset.e,10) <= st));
+      slide.querySelector('#stamp').classList.toggle('on', st>=4);
+    }
+
+    // false positive
+    if (slide.querySelector('[data-c]')){
+      slide.querySelectorAll('[data-c]').forEach(el =>
+        el.classList.toggle('on', parseInt(el.dataset.c,10) <= st));
+      slide.querySelectorAll('[data-o]').forEach(el =>
+        el.classList.toggle('on', parseInt(el.dataset.o,10) <= st));
+    }
+
+    // timeline
+    slide.querySelectorAll('[data-t]').forEach(el =>
+      el.classList.toggle('on', parseInt(el.dataset.t,10) <= st));
+  }
+  function setCell(slide,id,on){
+    const c = slide.querySelector('#'+id);
+    c.classList.toggle('one', on);
+    c.querySelector('.bv').textContent = on ? '1' : '0';
+  }
+
+  function render(){
+    slides.forEach((s,i) => s.classList.toggle('active', i===idx));
+    dots.forEach((d,i) => { d.classList.toggle('on', i===idx); d.classList.toggle('seen', i<idx); });
+    document.getElementById('cur').textContent = String(idx+1).padStart(2,'0');
+    const ms = maxStep(idx);
+    subprog.style.width = ms ? ((step/ms)*100) + '%' : '0%';
+    applySteps(slides[idx], step);
+    document.getElementById('prev').disabled = (idx===0 && step===0);
+  }
+
+  function forward(){
+    if (step < maxStep(idx)) { step++; }
+    else if (idx < total-1) { idx++; step = 0; }
+    render();
+  }
+  function backward(){
+    if (step > 0) { step--; }
+    else if (idx > 0) { idx--; step = maxStep(idx); }
+    render();
+  }
+
+  document.getElementById('next').addEventListener('click', e => { e.stopPropagation(); forward(); });
+  document.getElementById('prev').addEventListener('click', e => { e.stopPropagation(); backward(); });
+  stage.addEventListener('click', e => {
+    if (e.target.closest('.rail') || e.target.closest('button')) return;
+    forward();
+  });
+  window.addEventListener('keydown', e => {
+    if (['ArrowRight',' ','PageDown','Enter'].includes(e.key)) { e.preventDefault(); forward(); }
+    else if (['ArrowLeft','PageUp','Backspace'].includes(e.key)) { e.preventDefault(); backward(); }
+    else if (e.key === 'Home') { idx=0; step=0; render(); }
+    else if (e.key === 'End') { idx=total-1; step=maxStep(idx); render(); }
+  });
+
+  stage.focus();
+  render();
+})();
+</script>
+</body>
+</html>
