@@ -87,6 +87,15 @@ Triển khai **lõi phát hiện userland** bằng Rust (zero-dependency) trong 
     binding theo **file identity** chặn false positive.
 - Chạy: `cd engine && cargo run --bin edr-replay -- datasets/<x>.evt` ; test: `cargo test`.
 
+## 5c. Tài liệu bổ trợ
+
+- `engine_state_optimization.md` — 6 hướng **giới hạn bộ nhớ mà vẫn bắt tối đa** (viết chi tiết):
+  (1) tách detection-state/forensic-graph + collapse/rehydrate theo identity, (2) giữ-theo-nghi-ngờ
+  thay LRU thuần, (3) ngân sách theo nguồn/hub chống evict-as-evasion, (4) sketch xác suất
+  (HLL/CMS/Bloom) cho predicate, (5) spill sketch ra đĩa (sống qua reboot), (6) admission theo rarity.
+  Kèm stack đề xuất (1+2+3), bảng đánh đổi, ánh xạ vào code prototype, cách kiểm chứng (flood /
+  low-and-slow dataset). Liên kết từ engine.md §7.
+
 ## 6. Việc tiếp theo (chưa làm — người dùng có thể chọn)
 
 - [x] **Schema khai báo pattern/TTP** — ĐÃ LÀM: tách ra `rules/*.rules` + loader runtime (định dạng

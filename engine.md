@@ -447,6 +447,10 @@ neo vào node/hành vi bất thường và thu hẹp vùng đánh giá.
 Khi vượt trần: áp dụng **eviction** LRU theo `last_activity` cho storyline nguội, nhưng **không
 evict** storyline đang có automaton ≥ `θ_alert` (đang trong chuỗi tấn công).
 
+> ⚠️ LRU thuần là **bẫy** (giết chuỗi lén lút + mở đòn evict-as-evasion). Chiến lược bound bộ nhớ
+> mà vẫn bắt tối đa — tách detection-state/forensic-graph, giữ-theo-nghi-ngờ, ngân sách theo nguồn,
+> sketch xác suất, spill đĩa, admission theo rarity — xem **`engine_state_optimization.md`**.
+
 ---
 
 ## 8. DECIDE — biên với kernel (đường inline)
@@ -684,3 +688,65 @@ entropy cao (bị DENY do storyline đã armed). Xem `engine/README.md` cho bả
 cargo run --bin edr-replay -- datasets/<x>.evt [rules/<y>.rules]   # audit-mode; rule tùy chọn
 cargo test                                                         # test hành vi
 ```
+
+---
+
+## 13. Giới hạn hiện tại
+
+Ghi lại trung thực các giới hạn của bản hiện tại để không nhầm "chạy trên dữ liệu giả" với "dùng
+được trên endpoint thật". Chia hai nhóm: **(A) khoảng cách prototype ↔ thiết kế** (thiết kế có, code
+chưa làm) và **(B) giới hạn mô hình & đối kháng** (thuộc bản chất, cần nghiên cứu thêm).
+
+> Ngoài phạm vi mục này: phần **sensor kernel** và **đường enforcement thật** (chặn đồng bộ trong
+> kernel, ngân sách latency, fail-open) — được coi là hạng mục kiến trúc riêng, không liệt kê ở đây.
+
+### 13.1 (A) Khoảng cách prototype ↔ thiết kế
+
+- **Không có GC / eviction / trần tài nguyên.** §7 mô tả `GC_EXPIRED`, `MAX_AUTOMATA_PER_SID`,
+  `MAX_NODES_PER_SID`, eviction LRU — code **chưa** implement cái nào. Automaton không bị xoá sau
+  accept/block hay khi quá `seg_window` (seg_window chỉ chặn *commit* bước muộn, không giải phóng
+  automaton); storyline chỉ bị xoá khi merge. ⟹ chạy dài trên luồng event thật → **phình bộ nhớ vô
+  hạn / OOM**. Đây là khoảng cách rõ nhất.
+- **`completed_mask` là `u64` → tối đa 64 bước/mẫu.** Đa-word (§5.8) chưa làm; mẫu > 64 bước không
+  biểu diễn được.
+- **Chưa có trần binding / hạ cấp ALERT.** §5.8 yêu cầu giới hạn số binding sống và hạ cấp thay vì
+  vét cạn khi vượt trần — code chưa có, nên góc "binding + thứ tự tự do" (tiệm cận subgraph matching)
+  hiện **không có phanh**.
+- **Không lưu trạng thái bền (persistence).** Toàn bộ graph/automata ở in-memory, mất khi restart →
+  tấn công kéo dài qua reboot bị mất storyline. Chưa có snapshot.
+- **Độ phủ luật mỏng.** Chỉ 5 tagger (T1059/T1083/T1490/T1486/T1003) và 3 mẫu demo; thực tế cần hàng
+  trăm. Tagger là logic **Windows hardcode** trong `rules.rs`; nhánh Linux mới ở mức thiết kế (chưa
+  tách `platform/windows` · `platform/linux`).
+- **Identity/FileId chưa xử lý thật.** Prototype dùng token chuỗi trừu tượng; chưa implement FileId
+  128-bit + VolumeGuid + sequence, chưa vô hiệu node khi `delete`, chưa chống MFT-reuse / đụng độ
+  volume-serial, chưa degrade trên FAT/exFAT/mạng (xem §2). Binding hiện chỉ an toàn *trong mô phỏng*.
+- **Kiểm thử/benchmark hạn chế.** Mới 4 test hành vi trên dữ liệu tự chế; **chưa** chạy DARPA TC,
+  chưa red-team, chưa đo hiệu năng thật (throughput/latency dưới tải event thực). "O(1)" là phân
+  tích, chưa có số đo.
+
+### 13.2 (B) Giới hạn mô hình & đối kháng
+
+- **Phát hiện phụ thuộc chuỗi phải chạm một bước "arm được" trước khi gây hại.** Ví dụ: ransomware
+  đi thẳng `T1059 → T1486` (bỏ discovery và xoá shadow) thì mẫu không đủ nhóm giữa → **không arm,
+  không chặn**. Kể cả khi có, predicate T1486 cần 3 write/2 thư mục → **ít nhất 2 file đã mã hoá**
+  trước khi tagger bật; chỉ cơ chế arm (từ T1490) mới cứu được file đầu tiên.
+- **Storyline vỡ là mất tất cả.** Mô hình nhân-quả hiện đơn giản (exec cha-con, write file). Windows
+  có nhiều kênh nhân-quả ngầm — WMI, COM/ALPC, scheduled task, service creation, kế thừa
+  token/handle — **chưa mô hình hoá**. Kẻ tấn công sinh tiến trình qua WMI để cắt quan hệ cha-con
+  ⟹ chuỗi bị chia nhỏ, correlation thất bại.
+- **Tagger nhận diện theo tên file — giòn.** Copy `powershell.exe` → `a.exe` rồi chạy: basename
+  không khớp tập → **T1059 trượt → cả mẫu không seed**. Cần khoá theo chữ ký / `OriginalFilename` /
+  hash thay vì tên.
+- **Scoring chưa hiệu chỉnh.** Trọng số `w1..w4`, ngưỡng `θ`, bảng severity/rarity là **số chỉnh tay
+  cho demo**; `rarity` tĩnh, không đo từ baseline thật. Chưa có audit-only đo tỉ lệ false-positive —
+  mà với prevention, **FP = chặn nhầm phần mềm hợp lệ**, là lỗi đắt nhất.
+- **Né bằng mimicry / chuỗi im lặng / chậm dưới window.** Làm chuỗi độc trông như installer
+  ("ghi X chạy X") để ở mức SUSPECT; tránh TTP hiếm/ồn để không đủ điểm arm; kéo giãn từng đoạn để
+  không đoạn nào vượt `seg_window`.
+- **Chỉ trên một host.** Không correlate xuyên host (lateral movement) inline — phải đẩy lên backend.
+- **Không tự bảo vệ (self-protection).** Chưa chống kẻ tấn công đủ quyền tắt agent, gỡ driver, hay
+  **sửa file rule** (`rules/*.rules` là plaintext, không ký/không bảo vệ toàn vẹn).
+
+> Ưu tiên thu hẹp: (1) implement GC + trần tài nguyên (§13.1) để không OOM; (2) tagger theo chữ
+> ký/hash + mở rộng độ phủ; (3) chế độ audit-only + đo FP trên telemetry thật để hiệu chỉnh ngưỡng;
+> (4) mô hình thêm kênh nhân-quả ngầm (WMI/COM/service) để storyline không dễ vỡ.
