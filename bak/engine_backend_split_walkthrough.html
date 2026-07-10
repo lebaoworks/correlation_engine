@@ -1,0 +1,429 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Backend-split — Agent lean · Backend stitch · Arm ngược (bước qua từng event)</title>
+<style>
+  :root{
+    --bg:#0a0e14; --bg2:#0e131c; --panel:#141b26; --panel2:#1a2331;
+    --line:#25303f; --line2:#324054;
+    --ink:#e9eef5; --muted:#8b9aad; --dim:#5c6b7e;
+    --accent:#8b7cff; --cyan:#38bdf8;
+    --allow:#34d399; --arm:#fbbf24; --deny:#fb6f84;
+    --s1:#8b7cff; --s2:#38bdf8; --s3:#fb923c; --hub:#94a3b8;
+    --mono: ui-monospace,"Cascadia Code","JetBrains Mono","SFMono-Regular",Consolas,monospace;
+    --sans: system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{margin:0;background:
+      radial-gradient(1100px 700px at 82% -10%, #1622300f 0%, transparent 55%),
+      var(--bg);
+    color:var(--ink);font-family:var(--sans);
+    display:flex;align-items:center;justify-content:center;overflow:hidden;-webkit-font-smoothing:antialiased;}
+
+  .stage{position:relative;width:min(96vw, calc(92vh*16/9));aspect-ratio:16/9;
+    container-type:inline-size;
+    background:linear-gradient(180deg,var(--bg2),var(--panel) 140%);
+    border:1px solid var(--line);border-radius:1.1cqi;overflow:hidden;
+    box-shadow:0 3cqi 8cqi -3cqi #000, inset 0 0 0 1px #ffffff06;
+    display:grid;grid-template-columns:21% 79%;
+    grid-template-rows:4.6cqi 1fr 2.7cqi auto auto 3.7cqi;
+    grid-template-areas:"top top" "table graph" "table pipe" "table autos" "table note" "table rail";}
+
+  .top{grid-area:top;display:flex;align-items:center;justify-content:space-between;padding:0 2cqi;border-bottom:1px solid var(--line);gap:1cqi}
+  .brand{font-family:var(--mono);font-size:1.1cqi;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);display:flex;gap:.8cqi;align-items:center;white-space:nowrap}
+  .brand .d{width:.85cqi;height:.85cqi;border-radius:50%;background:var(--accent);box-shadow:0 0 1.4cqi var(--accent);flex:none}
+  .legend{display:flex;gap:1.1cqi;font-family:var(--mono);font-size:.98cqi;color:var(--muted);align-items:center;white-space:nowrap}
+  .legend i{width:1.7cqi;height:0;border-top:2px solid;display:inline-block;margin-right:.35cqi;vertical-align:middle}
+  .legend .lw{border-top-style:dashed;border-color:var(--arm)}
+  .legend .tc{border-top-style:dashed;border-color:var(--dim)}
+  .sw{width:.95cqi;height:.95cqi;border-radius:50%;display:inline-block;margin-right:.3cqi;vertical-align:middle}
+
+  /* ---- LEFT: event table ---- */
+  .table{grid-area:table;border-right:1px solid var(--line);padding:.7cqi .8cqi;display:flex;flex-direction:column;gap:.32cqi;overflow:hidden}
+  .table h3{font-family:var(--mono);font-size:.85cqi;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);margin:0 0 .1cqi}
+  .erow{border:1px solid var(--line);border-radius:.5cqi;padding:.3cqi .55cqi;background:var(--panel);opacity:.32;filter:saturate(.4);transition:.4s;display:flex;flex-direction:column;gap:.12cqi}
+  .erow.on{opacity:1;filter:none}
+  .erow.cur{border-color:var(--accent);box-shadow:0 0 2.4cqi -1cqi var(--accent);background:#8b7cff10}
+  .erow .l1{display:flex;justify-content:space-between;align-items:center;font-family:var(--mono);font-size:.7cqi;color:var(--dim)}
+  .erow .l2{font-family:var(--mono);font-size:.84cqi;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .erow .l2 .op{font-weight:700}
+  .op.causal{color:var(--accent)} .op.touch{color:var(--dim)} .op.flood{color:var(--s2)} .op.dirv{color:var(--arm)} .op.hubop{color:var(--s3)}
+  .erow .tag{font-family:var(--mono);font-size:.72cqi;align-self:flex-start;padding:.05cqi .45cqi;border-radius:.35cqi;border:1px solid var(--line2);color:var(--dim)}
+  .erow.on .tag.hit{color:var(--allow);border-color:#34d39955;background:#34d39912}
+  .erow.on .tag.warn{color:var(--arm);border-color:#fbbf2455;background:#fbbf2412}
+  .erow.on .tag.bad{color:var(--deny);border-color:#fb6f8455;background:#fb6f8412}
+
+  /* ---- RIGHT-TOP: graph ---- */
+  .graph{grid-area:graph;position:relative;margin:.9cqi 1.3cqi .3cqi;border:1px solid var(--line);border-radius:.9cqi;
+    background:radial-gradient(circle at 50% 40%, #ffffff06, transparent 70%), var(--bg2);overflow:hidden}
+  .glabel{position:absolute;top:.8cqi;left:1.1cqi;font-family:var(--mono);font-size:.85cqi;letter-spacing:.08em;text-transform:uppercase;color:var(--dim);z-index:3}
+  .edges{position:absolute;inset:0;width:100%;height:100%}
+  .gedge{stroke:var(--line2);stroke-width:2;opacity:0;transition:opacity .5s ease}
+  .gedge.on{opacity:1}
+  .gedge.s1{stroke:var(--s1)} .gedge.s2{stroke:var(--s2)} .gedge.s3{stroke:var(--s3)}
+  .gedge.touch{stroke:var(--dim);stroke-dasharray:4 4}
+  .gedge.lw{stroke:var(--arm);stroke-dasharray:5 4}
+  .gedge.denyE{stroke:var(--deny)}
+  .gnode{position:absolute;transform:translate(-50%,-50%) scale(.4);opacity:0;transition:.5s cubic-bezier(.34,1.4,.64,1);
+    width:5.4cqi;height:5.4cqi;border-radius:50%;border:1.5px solid var(--line2);background:var(--panel);
+    display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.08cqi;font-family:var(--mono);z-index:2;text-align:center;padding:.2cqi}
+  .gnode.on{opacity:1;transform:translate(-50%,-50%) scale(1)}
+  .gnode .k{font-size:.76cqi;font-weight:700;color:var(--ink);line-height:1.05}
+  .gnode .k2{font-size:.6cqi;color:var(--dim)}
+  .gnode.s1{border-color:var(--s1);background:#8b7cff18;box-shadow:0 0 3cqi -1cqi var(--s1)} .gnode.s1 .k2{color:var(--s1)}
+  .gnode.s2{border-color:var(--s2);background:#38bdf818;box-shadow:0 0 3cqi -1cqi var(--s2)} .gnode.s2 .k2{color:var(--s2)}
+  .gnode.s3{border-color:var(--s3);background:#fb923c18;box-shadow:0 0 3cqi -1cqi var(--s3)} .gnode.s3 .k2{color:var(--s3)}
+  .gnode.hub{border-style:dashed;border-color:var(--hub);background:#94a3b810} .gnode.hub .k2{color:var(--hub)}
+  .gnode.touch{border-style:dashed;border-color:var(--dim)} .gnode.touch .k2{color:var(--dim)}
+  .gnode.leak{border-color:var(--arm);box-shadow:0 0 3cqi -0.5cqi var(--arm)} .gnode.leak .k2{color:var(--arm)}
+  .gnode.denyN{border-color:var(--deny);box-shadow:0 0 3cqi -0.5cqi var(--deny)} .gnode.denyN .k2{color:var(--deny)}
+
+  /* ---- pipe: telemetry ▲ / directive ⇩ ---- */
+  .pipe{grid-area:pipe;margin:0 1.3cqi;display:flex;align-items:center;gap:.7cqi;font-family:var(--mono);font-size:.82cqi}
+  .chip{border:1px solid var(--line2);border-radius:.5cqi;padding:.2cqi .6cqi;color:var(--dim);background:var(--panel);white-space:nowrap;transition:.3s}
+  .chip b{color:var(--ink);font-weight:700}
+  .chip.upA{color:var(--allow);border-color:#34d39955;background:#34d39910}
+  .chip.dropA{color:var(--deny);border-color:#fb6f8455;background:#fb6f8410}
+  .chip.dirA{color:var(--arm);border-color:#fbbf2455;background:#fbbf2410}
+  .chip.karmA{color:var(--arm);border-color:#fbbf2455;background:#fbbf2410}
+  .chip.karmD{color:var(--deny);border-color:#fb6f8488;background:#fb6f8420}
+
+  /* ---- automata (agent + backend) ---- */
+  .autos{grid-area:autos;margin:.35cqi 1.3cqi 0;display:flex;flex-direction:column;gap:.4cqi}
+  .aut{display:flex;flex-direction:column;gap:.2cqi}
+  .autohd{display:flex;justify-content:space-between;align-items:center;gap:1cqi}
+  .autohd .t{font-family:var(--mono);font-size:.8cqi;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .state{font-family:var(--mono);font-size:.8cqi;font-weight:700;letter-spacing:.05em;padding:.12cqi .6cqi;border-radius:.4cqi;border:1px solid var(--line2);color:var(--dim);flex:none}
+  .state.seeded{color:var(--accent);border-color:#8b7cff55;background:#8b7cff12}
+  .state.armed{color:var(--arm);border-color:#fbbf2588;background:#fbbf2420}
+  .state.ok{color:var(--allow);border-color:#34d39988;background:#34d39915}
+  .state.blocked{color:var(--deny);border-color:#fb6f8488;background:#fb6f8420}
+  .amrow{display:flex;gap:.45cqi;align-items:stretch}
+  .abit{flex:1;border:1.5px solid var(--line2);border-radius:.5cqi;background:var(--panel);padding:.26cqi .45cqi;display:flex;align-items:center;gap:.45cqi;transition:.4s;min-width:0}
+  .abit .box{width:1.3cqi;height:1.3cqi;border-radius:.35cqi;border:1.5px solid var(--line2);display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:.8cqi;color:var(--dim);flex:none;transition:.4s}
+  .abit .m{min-width:0}
+  .abit .m .tt{font-family:var(--mono);font-size:.84cqi;color:var(--ink);font-weight:600;display:block;line-height:1.05;white-space:nowrap}
+  .abit .m .pr{font-family:var(--mono);font-size:.64cqi;color:var(--dim);white-space:nowrap}
+  .abit.set{border-color:var(--allow);background:#34d3990e}
+  .abit.set .box{border-color:var(--allow);background:var(--allow);color:#06281c}
+  .abit.set .pr{color:var(--allow)}
+  .abit.blockstep.set{box-shadow:0 0 0 2px var(--deny)}
+  .amfoot{display:flex;align-items:center;gap:.7cqi}
+  .mask{font-family:var(--mono);font-size:.82cqi;color:var(--muted);white-space:nowrap}
+  .mask b{color:var(--ink)}
+  .bar{flex:1;height:.85cqi;border-radius:1cqi;background:var(--panel2);border:1px solid var(--line);position:relative;overflow:visible}
+  .bar .fill{height:100%;width:0;border-radius:1cqi;background:linear-gradient(90deg,var(--accent),var(--cyan));transition:width .6s cubic-bezier(.4,0,.2,1)}
+  .bar .fill.warn{background:linear-gradient(90deg,var(--arm),#f59e0b)}
+  .bar .fill.crit{background:linear-gradient(90deg,var(--deny),var(--arm))}
+  .bar .tick{position:absolute;top:-.4cqi;bottom:-.4cqi;width:1.5px}
+  .bar .tick.a{left:30%;background:var(--arm)} .bar .tick.b{left:55%;background:var(--deny)}
+  .scoreN{font-family:var(--mono);font-size:.82cqi;color:var(--ink);min-width:3.4cqi;text-align:right}
+  .spacer{flex:1}
+
+  /* ---- narration ---- */
+  .note{grid-area:note;margin:.4cqi 1.3cqi .1cqi;font-family:var(--mono);font-size:.92cqi;line-height:1.36;color:var(--muted);
+    border-top:1px solid var(--line);padding-top:.5cqi;min-height:4.7cqi}
+  .note b{color:var(--ink)} .note .g{color:var(--allow)} .note .y{color:var(--arm)} .note .r{color:var(--deny)} .note .c{color:var(--s2)} .note .p{color:var(--accent)} .note .o{color:var(--s3)}
+
+  /* ---- rail ---- */
+  .rail{grid-area:rail;border-top:1px solid var(--line);display:flex;align-items:center;justify-content:flex-end;padding:0 1.3cqi;gap:.7cqi}
+  .nav{display:flex;gap:.6cqi;align-items:center}
+  .nav button{all:unset;cursor:pointer;font-family:var(--mono);font-size:1cqi;color:var(--muted);border:1px solid var(--line2);border-radius:.55cqi;padding:.26cqi .9cqi;transition:.2s;outline-offset:2px;white-space:nowrap}
+  .nav button:hover{color:var(--ink);border-color:var(--accent);background:#8b7cff14}
+  .nav button:focus-visible{outline:2px solid var(--accent)}
+  .nav .cnt{font-family:var(--mono);font-size:1.05cqi;color:var(--dim);padding:0 .5cqi}
+
+  /* ---- thuật ngữ click được + popup ---- */
+  .term{color:var(--ink);border-bottom:1px dashed var(--accent);cursor:pointer;transition:.15s}
+  .term:hover{color:var(--accent);background:#8b7cff14}
+  .pop-ov{position:absolute;inset:0;z-index:10;background:#05080dcc;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(2px)}
+  .pop-ov[hidden]{display:none}
+  .pop{width:min(54cqi,88%);max-height:78%;overflow:auto;background:var(--panel);border:1px solid var(--line2);border-radius:.9cqi;box-shadow:0 2cqi 6cqi -2cqi #000;padding:1.1cqi 1.3cqi}
+  .pop-hd{display:flex;justify-content:space-between;align-items:center;gap:1cqi;margin-bottom:.6cqi}
+  .pop-hd span{font-family:var(--mono);font-size:1.15cqi;font-weight:700;color:var(--accent);letter-spacing:.04em}
+  .pop-hd button{all:unset;cursor:pointer;font-family:var(--mono);font-size:1.05cqi;color:var(--dim);border:1px solid var(--line2);border-radius:.5cqi;padding:.12cqi .55cqi}
+  .pop-hd button:hover{color:var(--ink);border-color:var(--accent)}
+  .pop-b{font-family:var(--mono);font-size:.95cqi;line-height:1.55;color:var(--muted)}
+  .pop-b b{color:var(--ink)} .pop-b .g{color:var(--allow)} .pop-b .y{color:var(--arm)} .pop-b .r{color:var(--deny)}
+  .pop-b .p{color:var(--accent)} .pop-b .c{color:var(--s2)} .pop-b .o{color:var(--s3)}
+  .pop-b code{color:var(--cyan);font-family:var(--mono)}
+  .pop-b .src{display:block;margin-top:.7cqi;font-size:.8cqi;color:var(--dim)}
+
+  @media (prefers-reduced-motion: reduce){*{transition-duration:.12s !important}}
+</style>
+</head>
+<body>
+  <div class="stage" id="stage" tabindex="0">
+    <div class="top">
+      <div class="brand"><span class="d"></span> Backend-split · Agent lean · Stitch · Arm ngược</div>
+      <div class="legend">
+        <span><span class="sw" style="background:var(--s1)"></span>S1</span>
+        <span><span class="sw" style="background:var(--s2)"></span>S2 flood</span>
+        <span><span class="sw" style="background:var(--s3)"></span>S3 (hub-split)</span>
+        <span><i class="lw"></i>link_weak</span>
+        <span><i class="tc"></i>touch</span>
+      </div>
+    </div>
+
+    <!-- LEFT: event table -->
+    <div class="table">
+      <h3>Luồng event</h3>
+      <div class="erow" data-ev="1">
+        <div class="l1"><span>E1 · t=1000</span><span>causal</span></div>
+        <div class="l2"><span class="op causal">exec</span> explorer → powershell</div>
+        <div class="tag hit">⇒ T1059 · seed 2 phía</div>
+      </div>
+      <div class="erow" data-ev="2">
+        <div class="l1"><span>E2 · t=1500</span><span>touch</span></div>
+        <div class="l2"><span class="op touch">open</span> powershell → \Documents</div>
+        <div class="tag hit">⇒ T1083</div>
+      </div>
+      <div class="erow" data-ev="3">
+        <div class="l1"><span>E3 · t=1800</span><span>flood ×50k</span></div>
+        <div class="l2"><span class="op flood">write</span> updater.exe → log.*</div>
+        <div class="tag">⇒ T0 · drop-first</div>
+      </div>
+      <div class="erow" data-ev="4">
+        <div class="l1"><span>E4 · t=2000</span><span>causal</span></div>
+        <div class="l2"><span class="op causal">exec</span> powershell → vssadmin</div>
+        <div class="tag warn">⇒ T1490 · ARM cục bộ S1</div>
+      </div>
+      <div class="erow" data-ev="5">
+        <div class="l1"><span>E5 · t=2300</span><span>causal</span></div>
+        <div class="l2"><span class="op causal">create</span> powershell → svc:Updater</div>
+        <div class="tag">⇒ persistence</div>
+      </div>
+      <div class="erow" data-ev="6">
+        <div class="l1"><span>E6 · t=2600</span><span>hub-split</span></div>
+        <div class="l2"><span class="op hubop">exec</span> services.exe → payload</div>
+        <div class="tag warn">⇒ link_weak(S1,S3)</div>
+      </div>
+      <div class="erow" data-ev="7">
+        <div class="l1"><span>E7 · t=2700</span><span>causal</span></div>
+        <div class="l2"><span class="op causal">write</span> payload → doc1 · entropy↑</div>
+        <div class="tag bad">⇒ T1486 · LỌT (trễ)</div>
+      </div>
+      <div class="erow" data-ev="8">
+        <div class="l1"><span>E8 · t=2900</span><span>control ⇩</span></div>
+        <div class="l2"><span class="op dirv">directive</span> ArmDirective(payload·write)</div>
+        <div class="tag warn">⇒ ký · seq · TTL 15m</div>
+      </div>
+      <div class="erow" data-ev="9">
+        <div class="l1"><span>E9 · t=3000</span><span>causal</span></div>
+        <div class="l2"><span class="op causal">write</span> payload → doc2 · entropy↑</div>
+        <div class="tag bad">⇒ DENY trong kernel</div>
+      </div>
+    </div>
+
+    <!-- RIGHT-TOP: graph -->
+    <div class="graph" id="graph">
+      <div class="glabel">Đồ thị @ backend (full) — agent chỉ giữ node lean + sid</div>
+      <svg class="edges" viewBox="0 0 100 100" preserveAspectRatio="none">
+        <line class="gedge s1"    data-ev="1" x1="7"  y1="22" x2="24" y2="42" vector-effect="non-scaling-stroke"/>
+        <line class="gedge touch" data-ev="2" x1="24" y1="42" x2="7"  y2="64" vector-effect="non-scaling-stroke"/>
+        <line class="gedge s2"    data-ev="3" x1="12" y1="90" x2="28" y2="90" vector-effect="non-scaling-stroke"/>
+        <line class="gedge s1"    data-ev="4" x1="24" y1="42" x2="38" y2="12" vector-effect="non-scaling-stroke"/>
+        <line class="gedge s1"    data-ev="5" x1="24" y1="42" x2="48" y2="58" vector-effect="non-scaling-stroke"/>
+        <line class="gedge s3"    data-ev="6" x1="64" y1="14" x2="76" y2="44" vector-effect="non-scaling-stroke"/>
+        <line class="gedge lw"    data-ev="6" x1="48" y1="58" x2="76" y2="44" vector-effect="non-scaling-stroke"/>
+        <line class="gedge s3"    data-ev="7" x1="76" y1="44" x2="66" y2="84" vector-effect="non-scaling-stroke"/>
+        <line class="gedge denyE" data-ev="9" x1="76" y1="44" x2="90" y2="86" vector-effect="non-scaling-stroke"/>
+      </svg>
+      <div class="gnode s1"    data-ev="1" style="left:7%;top:22%"><span class="k">explorer</span><span class="k2">P0 · S1</span></div>
+      <div class="gnode s1"    data-ev="1" style="left:24%;top:42%"><span class="k">powershell</span><span class="k2">P1 · S1</span></div>
+      <div class="gnode touch" data-ev="2" style="left:7%;top:64%"><span class="k">\Documents</span><span class="k2">touch</span></div>
+      <div class="gnode s2"    data-ev="3" style="left:12%;top:90%"><span class="k">updater.exe</span><span class="k2">root B · S2</span></div>
+      <div class="gnode s2"    data-ev="3" style="left:28%;top:90%"><span class="k">log ×50k</span><span class="k2">T0 · S2</span></div>
+      <div class="gnode s1"    data-ev="4" style="left:38%;top:12%"><span class="k">vssadmin</span><span class="k2">S1</span></div>
+      <div class="gnode s1"    data-ev="5" style="left:48%;top:58%"><span class="k">svc:Updater</span><span class="k2">S1 · reg</span></div>
+      <div class="gnode hub"   data-ev="6" style="left:64%;top:14%"><span class="k">services.exe</span><span class="k2">HUB</span></div>
+      <div class="gnode s3"    data-ev="6" style="left:76%;top:44%"><span class="k">payload.exe</span><span class="k2">root MỚI · S3</span></div>
+      <div class="gnode s3 leak"  data-ev="7" style="left:66%;top:84%"><span class="k">doc1</span><span class="k2">LỌT · trễ</span></div>
+      <div class="gnode s3 denyN" data-ev="9" style="left:90%;top:86%"><span class="k">doc2</span><span class="k2">DENY</span></div>
+    </div>
+
+    <!-- pipe: telemetry / directive / kernel-arm -->
+    <div class="pipe">
+      <span class="chip" id="cShip">▲ ship T2+ <b id="shipN">0</b></span>
+      <span class="chip" id="cDrop">▲ drop T0 <b id="dropN">0</b></span>
+      <span class="chip" id="cDir">⇩ directive <b id="dirN">—</b></span>
+      <span class="spacer"></span>
+      <span class="chip" id="cKarm">kernel-arm <b id="karmN">∅</b></span>
+    </div>
+
+    <!-- automata -->
+    <div class="autos">
+      <div class="aut">
+        <div class="autohd"><span class="t" id="titA">A @ agent · S1</span><span class="state" id="stateA">IDLE</span></div>
+        <div class="amrow">
+          <div class="abit" id="a0"><div class="box">0</div><div class="m"><span class="tt">T1059</span><span class="pr">prereq { }</span></div></div>
+          <div class="abit" id="a1"><div class="box">1</div><div class="m"><span class="tt">T1490</span><span class="pr">prereq { 0 }</span></div></div>
+          <div class="abit" id="a2"><div class="box">2</div><div class="m"><span class="tt">T1083</span><span class="pr">prereq { 0 }</span></div></div>
+          <div class="abit blockstep" id="a3"><div class="box">3</div><div class="m"><span class="tt">T1486 ⛒</span><span class="pr">prereq { 1,2 }</span></div></div>
+        </div>
+        <div class="amfoot"><span class="mask">mask <b id="maskA">0000</b></span><span class="spacer"></span><span class="scoreN" id="scoreA">0.0</span></div>
+      </div>
+      <div class="aut">
+        <div class="autohd"><span class="t" id="titB">A′ @ backend · mirror S1</span><span class="state" id="stateB">—</span></div>
+        <div class="amrow">
+          <div class="abit" id="b0"><div class="box">0</div><div class="m"><span class="tt">T1059</span><span class="pr">prereq { }</span></div></div>
+          <div class="abit" id="b1"><div class="box">1</div><div class="m"><span class="tt">T1490</span><span class="pr">prereq { 0 }</span></div></div>
+          <div class="abit" id="b2"><div class="box">2</div><div class="m"><span class="tt">T1083</span><span class="pr">prereq { 0 }</span></div></div>
+          <div class="abit blockstep" id="b3"><div class="box">3</div><div class="m"><span class="tt">T1486 ⛒</span><span class="pr">prereq { 1,2 }</span></div></div>
+        </div>
+        <div class="amfoot"><span class="mask">mask <b id="maskB">0000</b></span><div class="bar"><span class="tick a"></span><span class="tick b"></span><span class="fill" id="fillB"></span></div><span class="scoreN" id="scoreB">0.0</span></div>
+      </div>
+    </div>
+
+    <!-- narration -->
+    <div class="note" id="note"></div>
+
+    <!-- popup giải thích thuật ngữ -->
+    <div class="pop-ov" id="popov" hidden>
+      <div class="pop">
+        <div class="pop-hd"><span id="popT"></span><button id="popX" aria-label="Đóng">✕</button></div>
+        <div class="pop-b" id="popB"></div>
+      </div>
+    </div>
+
+    <!-- rail -->
+    <div class="rail">
+      <div class="nav">
+        <button id="reset" aria-label="Reset">↺</button>
+        <button id="prev" aria-label="Lùi">‹</button>
+        <span class="cnt" id="cnt">0 / 9</span>
+        <button id="next" aria-label="Thêm event">Thêm event ›</button>
+      </div>
+    </div>
+  </div>
+
+<script>
+(() => {
+  const stage = document.getElementById('stage');
+  const TOTAL = 9;
+  let s = 0;
+
+  // bit theo bước — agent (kẹt 0111 sau hub-split) vs backend (stitch → 1111)
+  const BITA = {0:[0,0,0,0],1:[1,0,0,0],2:[1,0,1,0],3:[1,0,1,0],4:[1,1,1,0],5:[1,1,1,0],6:[1,1,1,0],7:[1,1,1,0],8:[1,1,1,0],9:[1,1,1,0]};
+  const BITB = {0:[0,0,0,0],1:[1,0,0,0],2:[1,0,1,0],3:[1,0,1,0],4:[1,1,1,0],5:[1,1,1,0],6:[1,1,1,0],7:[1,1,1,1],8:[1,1,1,1],9:[1,1,1,1]};
+  const SCA  = {0:'0.0',1:'4.1',2:'6.9',3:'6.9',4:'12.1',5:'12.1',6:'12.1',7:'12.1',8:'12.1',9:'12.1'};
+  const SCB  = {0:'0.0',1:'4.1',2:'6.9',3:'6.9',4:'12.1',5:'12.1',6:'12.1',7:'18.8',8:'18.8',9:'18.8'};
+  const WID  = {0:0,1:20,2:34,3:34,4:60,5:60,6:60,7:94,8:94,9:94};
+  const STA  = {0:['IDLE',''],1:['SEEDED','seeded'],2:['SEEDED','seeded'],3:['SEEDED','seeded'],
+                4:['ARMED·S1','armed'],5:['ARMED·S1','armed'],6:['ARMED·S1','armed'],
+                7:['ARMED·S1 (hụt)','armed'],8:['ARMED·S1','armed'],9:['ARMED·S1','armed']};
+  const STB  = {0:['—',''],1:['MIRROR','seeded'],2:['MIRROR','seeded'],3:['MIRROR','seeded'],4:['MIRROR','seeded'],
+                5:['MIRROR','seeded'],6:['STITCH · ARM⇩','armed'],7:['ACCEPT','ok'],8:['ACCEPT','ok'],9:['ACCEPT','ok']};
+  const TITB = {def:"A′ @ backend · mirror S1", st:"A′ @ backend · STITCHED S1+S3"};
+  const SHIP = {0:0,1:1,2:2,3:2,4:3,5:4,6:5,7:6,8:6,9:7};
+  const DROP = {0:'0',1:'0',2:'0',3:'49 231',4:'49 231',5:'49 231',6:'49 231',7:'49 231',8:'49 231',9:'49 231'};
+  const DIR  = {0:'—',1:'—',2:'—',3:'—',4:'—',5:'—',6:'1 · in-flight',7:'1 · in-flight',8:'1 · đã áp',9:'1 · đã áp'};
+  const KARM = {0:'∅',1:'∅',2:'∅',3:'∅',4:'S1·write',5:'S1·write',6:'S1·write',7:'S1·write',
+                8:'S1·write + payload·write',9:'payload·write → DENY ✓'};
+
+  const NOTE = {
+    0:'Kịch bản backend-split (engine_backend_split.md) — 9 bước phủ các edge: <span class="term" data-k="admission">bỏ admission</span>, <span class="term" data-k="ephemeral">cạnh phù du</span>, <span class="term" data-k="tier">flood theo tier</span>, <span class="term" data-k="localarm">arm cục bộ</span>, <span class="term" data-k="hubsplit">hub-split</span> + <span class="term" data-k="linkweak">link_weak</span>, <span class="term" data-k="stitcher">stitcher</span>, <span class="term" data-k="latency">cửa sổ trễ</span>, <span class="term" data-k="signed">directive ký</span>, <span class="term" data-k="kdeny">DENY kernel</span> — click từng cụm để xem giải thích. Bấm <b>→</b> để chạy.',
+    1:'E1 <b>exec</b>: explorer+powershell vào <span class="p">S1</span>. T1059 = step gốc → seed <b>cả hai phía</b>: A@agent và A′@backend (mirror từ stream ship). <span class="p">Không còn admission</span> — TTP phổ biến vẫn seed, automaton ~1KB (§1.3): chuỗi LotL không còn bị bỏ lỡ tại gốc.',
+    2:'E2 <b>open</b> touch: không merge, T1083 → <span class="g">bit2</span> (nhóm giữa tự do). Trên agent cạnh là <b>phù du</b>: cập nhật DSU/rate → SHIP → quên (§1.2). Đồ thị bạn đang xem là bản <b>backend</b> giữ — agent chỉ còn node lean {identity, sid}.',
+    3:'E3 <span class="c">flood</span>: updater.exe spam 50k write vô hại (tier T0). Hàng đợi ship <b>drop T0 trước</b> (counter → backend thấy lỗ seq, biết stream không toàn vẹn); event S1 (T2+) vẫn đi trước. Per-root budget tự dọn node của updater; churn = tín hiệu scoring (§1.5, §2). <b>A@agent không suy suyển</b> — flood không đẩy được state nguồn khác.',
+    4:'E4 vssadmin → T1490, mask 0111, score 12.1 ≥ <span class="r">θ_block</span>, còn T1486 enforceable chờ → agent tự ARM kernel như cũ, <b>scope = identity đã bind trong S1</b>. Nhưng để ý: kẻ mã hoá sắp tới sẽ <b>không nằm trong S1</b>…',
+    5:'E5 <b>create</b> service "Updater" (causal → node reg vào S1) → ship. Persistence: chuỗi chuẩn bị <b>bàn giao qua hub</b> services.exe — đúng kịch bản FN nguồn 1.',
+    6:'E6 services.exe ∈ <b>stable_hubs</b> exec payload → con hub <b>TỰ LÀM ROOT</b>: <span class="o">S3 riêng</span>, agent KHÔNG merge, chỉ phát <span class="y">link_weak(S1,S3)</span> ở hạng điều khiển. Backend <b>stitch</b> S1+S3 (không có trần merge) → A′ kế thừa mask 0111 → đủ điều kiện arm → <span class="y">⇩ ArmDirective(payload·write, ký, TTL)</span> — <b>in-flight</b>, mất một round-trip (RTT) mới tới agent.',
+    7:'E7 payload write doc1 entropy↑ = T1486. Agent: S3 <b>không có automaton</b> (T1486 không phải step gốc) + arm cục bộ chỉ scope S1 → ALLOW → <span class="r">doc1 LỌT</span>. Đây là <b>cửa sổ trễ</b> — giới hạn vật lý của mọi kiến trúc phân tán (§7). Backend: mask 1111 → <span class="g">ACCEPT</span>, arm đã gửi từ E6.',
+    8:'E8 <span class="y">⇩ directive tới</span>: agent verify <b>chữ ký + seq đơn điệu + TTL 15m</b>, dưới trần sanity (§4.2) → ghi bảng kernel-arm theo <b>identity</b> payload (không phải path — rename vô hiệu). Không round-trip nào cần nữa.',
+    9:'E9 payload write doc2 → kernel khớp arm identity → <span class="r">DENY trong kernel</span>, đồng bộ. Tổng kết: mất đúng <b>1 file</b> trong cửa sổ trễ; agent tự chứa một mình sẽ mất <b>tất cả</b> (FN hub-split); admission-FN thì đã bị loại từ E1. Metric chính của kiến trúc = số hành động lọt trong cửa sổ này (§9).'
+  };
+
+  // ---- giải thích thuật ngữ (popup) ----
+  const TERMS = {
+    admission:{t:'Bỏ admission',b:'Trong stack tự chứa (engine_state_optimization.md, Hướng 6), agent chỉ <b>seed automaton</b> khi event có <b>neo hiếm</b> (rarity ≥ ρ_admit) hoặc root-gate đặc thù — để không tạo state bền cho hoạt động phổ biến. Cái giá: chuỗi <b>living-off-the-land</b> mà mọi bước đều phổ biến sẽ <span class="r">không bao giờ có automaton</span>; và nếu neo hiếm đến <b>giữa chừng</b> thì tiền tố chuỗi đã trôi qua, automaton sinh ra đã chết.<br><br>Trong backend-split, agent không còn cõng graph forensic nên một automaton chỉ tốn ~1KB → <b>seed rộng rãi như engine gốc</b> (cứ TTP khớp step gốc là seed, qua chỉ mục <code>PATTERN_TRIGGER</code>). Nguồn false-negative nặng nhất — và là nguồn duy nhất <b>không khôi phục được</b> vì state chưa từng tồn tại — bị loại bỏ hoàn toàn.<span class="src">engine_backend_split.md §1.3 · engine_state_optimization.md Hướng 6</span>'},
+    ephemeral:{t:'Cạnh phù du (agent không giữ edges)',b:'Node trên agent chỉ còn <code>{identity, sid}</code> (~100–150B, "node lean"). Một cạnh sống đúng một khoảnh khắc trong <code>ON_EVENT</code>: <b>(1)</b> cập nhật DSU nếu là cạnh causal, <b>(2)</b> cập nhật bộ đếm rate/sketch của tagger, <b>(3)</b> SHIP nguyên event lên backend — rồi <b>quên</b>, không ghi vào bộ nhớ.<br><br>Đồ thị đầy đủ (cạnh + attrs điều tra) chỉ backend giữ — đó là lý do panel đồ thị trong walkthrough này được ghi chú "@ backend (full)". Nhờ vậy cùng một ngân sách RAM, agent giữ được số node <b>gấp cỡ một bậc</b>, đủ chỗ cho mọi trạng thái phát hiện.<span class="src">engine_backend_split.md §1.2</span>'},
+    tier:{t:'Flood theo tier (drop T0-first)',b:'Hàng đợi ship phân hạng theo <b>tier của storyline</b> (từ priority-retention): <code>T0</code> = graph thuần không automaton, <code>T1</code> = mới seed, <code>T2</code> = SUSPECT, <code>T3</code> = armed/≥θ_alert.<br><br>Khi kẻ tấn công (hoặc phần mềm ồn ào) spam hàng chục nghìn event vô hại gây backpressure: <b>drop T0 trước</b>, event T2+ <span class="g">không bao giờ drop</span> và luôn đi trước. Counter drop + lỗ <code>seq</code> đơn điệu cho backend biết stream không toàn vẹn — <b>mất event là tín hiệu, không im lặng</b>. Kèm per-root budget: nguồn flood chỉ tự dọn node của nó, và churn bất thường tự thành tín hiệu scoring — <b>flooding tự tố cáo</b>.<span class="src">engine_backend_split.md §1.5, §2</span>'},
+    localarm:{t:'Arm cục bộ',b:'Cơ chế gốc của engine (engine.md §5.5): khi chuỗi <b>đủ điểm</b> (score ≥ θ_block) nhưng bước enforceable cuối (mã hoá, đọc LSASS…) <b>chưa tới</b>, agent đẩy sẵn cờ chặn xuống kernel — <code>PUSH_KERNEL_ARM</code>. Kernel tự DENY ngay khi event khớp, <b>không round-trip userland</b>.<br><br>Trong kịch bản này, E4 (vssadmin) kích hoạt arm với <b>scope = các identity đã bind trong S1</b>. Twist của kịch bản: payload mã hoá lại nằm ở S3 (do hub-split) nên arm cục bộ <span class="r">trượt phạm vi</span> — phải chờ backend arm bổ sung. Đó là lý do cần cả hai tầng.<span class="src">engine.md §5.5 · engine_backend_split.md §7</span>'},
+    hubsplit:{t:'Hub-split',b:'Process hub sống lâu (<code>services.exe</code>, <code>explorer.exe</code>, <code>svchost.exe</code>) là cha của gần như cả máy — nếu cứ merge theo quan hệ cha-con thì storyline của hub <b>nuốt tất cả</b> (dependency explosion). Đối sách: con của hub trong danh sách <code>stable_hubs</code> <b>tự làm root mới</b> → storyline riêng (S3 cam trong đồ thị), agent không merge.<br><br>Cái giá: chuỗi tấn công <b>bàn giao qua hub</b> (persistence qua service như E5→E6) bị cắt đôi trên agent — automaton S1 không bao giờ thấy event của S3. Trong kiến trúc backend-split, cái giá này được backend <b>stitch</b> bù lại, chỉ còn chịu cửa sổ trễ.<span class="src">engine_backend_split.md §1.4 · engine_state_optimization.md Hướng 3</span>'},
+    linkweak:{t:'link_weak',b:'Khi từ chối merge (hub-split hoặc vượt trần), agent không vứt bỏ quan hệ — nó ghi một <b>cạnh tham chiếu</b> <code>link_weak(sid_a, sid_b)</code>: không hợp DSU, hai storyline không chia sẻ automaton, nhưng vết nhân-quả được bảo toàn.<br><br>Điểm mấu chốt trong backend-split: <code>link_weak</code> được ship ở <b>hạng điều khiển</b> (không bao giờ xếp sau telemetry thường, không bị drop) — nó là nguyên liệu đầu vào cho stitcher trên backend. Trong đồ thị, nó là cạnh <span class="y">nét đứt vàng</span> giữa svc:Updater và payload.exe.<span class="src">engine_backend_split.md §2, §3.2</span>'},
+    stitcher:{t:'Stitcher (backend)',b:'Backend nhận full event stream nên dựng lại đúng thuật toán RESOLVE/UNIFY của engine — nhưng <b>không có trần merge</b>. Nhận <code>link_weak(S1,S3)</code>, nó hợp nhất hai sub-storyline thành một chuỗi, rồi <b>chạy lại matcher</b> (ADVANCE) trên chuỗi đã khâu — offline, không deadline, được phép làm cả những phép đắt (subgraph matching kiểu POIROT, window dài, cross-host).<br><br>Nếu automaton đã khâu đạt điều kiện arm (đủ điểm + còn bước enforceable chưa tới) → đẩy <code>ArmDirective</code> ngược xuống agent. Trong walkthrough: hàng automaton A′ đổi tiêu đề thành "STITCHED S1+S3" tại E6.<span class="src">engine_backend_split.md §3.2</span>'},
+    latency:{t:'Cửa sổ trễ (latency window)',b:'Khoảng thời gian từ lúc <b>backend kết luận</b> (E6: stitch xong, gửi directive) đến lúc <b>arm có hiệu lực trong kernel</b> của agent (E8). Hành động độc xảy ra bên trong cửa sổ này <span class="r">lọt</span> — trong kịch bản là doc1 (E7).<br><br>Đây là <b>giới hạn vật lý</b> của mọi kiến trúc phân tán, không phải lỗi thiết kế: verdict inline không được chờ mạng (fail-open), nên kết luận sinh ra ở xa luôn trễ một round-trip. Hệ quả thiết kế: mẫu nào cần chặn <b>hành động đầu tiên</b> thì bắt buộc phải khớp được bằng state cục bộ của agent; và <b>số hành động lọt trong cửa sổ</b> là metric chính để đánh giá kiến trúc.<span class="src">engine_backend_split.md §7, §9</span>'},
+    signed:{t:'Directive ký',b:'Kênh điều khiển xuống là <b>bề mặt tấn công mới</b>: một lệnh arm giả = DoS chặn nhầm hàng loạt (biến EDR thành vũ khí). Vì vậy mọi <code>ArmDirective</code> phải qua: <b>(1)</b> mTLS + <b>chữ ký số</b> từng directive (khoá riêng cho control-plane), <b>(2)</b> <code>seq</code> đơn điệu — agent bỏ directive cũ/replay, <b>(3)</b> <code>TTL</code> bắt buộc theo cơ chế lease — backend phải gia hạn, mất backend thì arm tự tan, không để lại trạng thái chặn mồ côi, <b>(4)</b> <b>trần sanity</b> phía agent (số arm sống tối đa per-root/toàn cục) — backend bị chiếm cũng không biến agent thành công tắc tắt máy.<br><br>Arm luôn theo <b>identity</b> (FileId, (pid,start)), không theo path/tên — rename vô hiệu.<span class="src">engine_backend_split.md §4</span>'},
+    kdeny:{t:'DENY trong kernel',b:'Khi event enforcing tới, kernel tra bảng arm (hash nonpaged, khoá theo identity) <b>ngay tại hook đồng bộ</b> — minifilter pre-op cho write/create, <code>PsSetCreateProcessNotifyRoutineEx</code> cho exec, <code>ObRegisterCallbacks</code> cho mở handle process… — và trả <code>STATUS_ACCESS_DENIED</code> tại chỗ.<br><br>Không có round-trip userland nào trên đường chặn: userland/backend chỉ <b>chuẩn bị trạng thái</b> (arm) từ trước; kernel là nơi thi hành. Trong kịch bản, E9 (write doc2) bị chặn kiểu này — write mã hoá thứ hai không bao giờ chạm đĩa.<span class="src">engine.md §8, §8.1 · engine_backend_split.md §4.1</span>'}
+  };
+  const popov = document.getElementById('popov');
+  const openPop = k => { const d = TERMS[k]; if(!d) return;
+    document.getElementById('popT').textContent = d.t;
+    document.getElementById('popB').innerHTML = d.b;
+    popov.hidden = false; };
+  const closePop = () => { popov.hidden = true; };
+  document.getElementById('note').addEventListener('click', e=>{
+    const t = e.target.closest('.term'); if(t) openPop(t.dataset.k);
+  });
+  popov.addEventListener('click', e=>{ if(!e.target.closest('.pop')) closePop(); });
+  document.getElementById('popX').addEventListener('click', closePop);
+
+  function setBits(pre, arr){
+    arr.forEach((v,i)=>document.getElementById(pre+i).classList.toggle('set', !!v));
+  }
+  const maskStr = b => ''+b[3]+b[2]+b[1]+b[0];
+
+  function render(){
+    document.querySelectorAll('.erow').forEach(el=>{
+      const e = +el.dataset.ev;
+      el.classList.toggle('on', e<=s);
+      el.classList.toggle('cur', e===s);
+    });
+    document.querySelectorAll('.gnode,.gedge').forEach(el=>{
+      el.classList.toggle('on', +el.dataset.ev <= s);
+    });
+
+    setBits('a', BITA[s]); setBits('b', BITB[s]);
+    document.getElementById('maskA').textContent = maskStr(BITA[s]);
+    document.getElementById('maskB').textContent = maskStr(BITB[s]);
+    document.getElementById('scoreA').textContent = SCA[s];
+    document.getElementById('scoreB').textContent = SCB[s];
+    const fill = document.getElementById('fillB');
+    fill.style.width = WID[s]+'%';
+    fill.classList.toggle('warn', s>=2 && s<4);
+    fill.classList.toggle('crit', s>=4);
+
+    const [ta,ca] = STA[s]; const stA = document.getElementById('stateA');
+    stA.textContent = ta; stA.className = 'state '+ca;
+    const [tb,cb] = STB[s]; const stB = document.getElementById('stateB');
+    stB.textContent = tb; stB.className = 'state '+cb;
+    document.getElementById('titB').textContent = s>=6 ? TITB.st : TITB.def;
+
+    document.getElementById('shipN').textContent = SHIP[s];
+    document.getElementById('dropN').textContent = DROP[s];
+    document.getElementById('dirN').textContent  = DIR[s];
+    document.getElementById('karmN').textContent = KARM[s];
+    document.getElementById('cShip').className = 'chip' + (SHIP[s]>0 ? ' upA':'');
+    document.getElementById('cDrop').className = 'chip' + (s>=3 ? ' dropA':'');
+    document.getElementById('cDir').className  = 'chip' + (s>=6 ? ' dirA':'');
+    document.getElementById('cKarm').className = 'chip' + (s>=9 ? ' karmD' : (s>=4 ? ' karmA':''));
+
+    document.getElementById('note').innerHTML = NOTE[s];
+    document.getElementById('cnt').textContent = s + ' / ' + TOTAL;
+    document.getElementById('prev').disabled = s===0;
+  }
+
+  const next = () => { if(s<TOTAL){s++;render();} };
+  const prev = () => { if(s>0){s--;render();} };
+  document.getElementById('next').addEventListener('click', e=>{e.stopPropagation();next();});
+  document.getElementById('prev').addEventListener('click', e=>{e.stopPropagation();prev();});
+  document.getElementById('reset').addEventListener('click', e=>{e.stopPropagation();s=0;render();});
+  window.addEventListener('keydown', e=>{
+    if(e.key==='Escape'){closePop();return;}
+    if(!popov.hidden){closePop();}
+    if(['ArrowRight',' ','Enter','PageDown'].includes(e.key)){e.preventDefault();next();}
+    else if(['ArrowLeft','PageUp','Backspace'].includes(e.key)){e.preventDefault();prev();}
+    else if(e.key==='Home'){s=0;render();}
+    else if(e.key==='End'){s=TOTAL;render();}
+    else if(e.key.toLowerCase()==='r'){s=0;render();}
+  });
+
+  stage.focus(); render();
+})();
+</script>
+</body>
+</html>

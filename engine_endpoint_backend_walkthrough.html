@@ -1,0 +1,437 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Endpoint–Backend — Working-set · Storyline routing · Chặn cục bộ (bước qua từng event)</title>
+<style>
+  :root{
+    --bg:#0a0e14; --bg2:#0e131c; --panel:#141b26; --panel2:#1a2331;
+    --line:#25303f; --line2:#324054;
+    --ink:#e9eef5; --muted:#8b9aad; --dim:#5c6b7e;
+    --accent:#8b7cff; --cyan:#38bdf8;
+    --allow:#34d399; --arm:#fbbf24; --deny:#fb6f84;
+    --s1:#8b7cff; --slow:#fb923c;
+    --mono: ui-monospace,"Cascadia Code","JetBrains Mono","SFMono-Regular",Consolas,monospace;
+    --sans: system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{margin:0;background:
+      radial-gradient(1100px 700px at 82% -10%, #1622300f 0%, transparent 55%),
+      var(--bg);
+    color:var(--ink);font-family:var(--sans);
+    display:flex;align-items:center;justify-content:center;overflow:hidden;-webkit-font-smoothing:antialiased;}
+
+  .stage{position:relative;width:min(96vw, calc(92vh*16/9));aspect-ratio:16/9;
+    container-type:inline-size;
+    background:linear-gradient(180deg,var(--bg2),var(--panel) 140%);
+    border:1px solid var(--line);border-radius:1.1cqi;overflow:hidden;
+    box-shadow:0 3cqi 8cqi -3cqi #000, inset 0 0 0 1px #ffffff06;
+    display:grid;grid-template-columns:21% 79%;
+    grid-template-rows:4.6cqi 1fr 2.7cqi auto auto 3.7cqi;
+    grid-template-areas:"top top" "table graph" "table pipe" "table autos" "table note" "table rail";}
+
+  .top{grid-area:top;display:flex;align-items:center;justify-content:space-between;padding:0 2cqi;border-bottom:1px solid var(--line);gap:1cqi}
+  .brand{font-family:var(--mono);font-size:1.1cqi;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);display:flex;gap:.8cqi;align-items:center;white-space:nowrap}
+  .brand .d{width:.85cqi;height:.85cqi;border-radius:50%;background:var(--accent);box-shadow:0 0 1.4cqi var(--accent);flex:none}
+  .legend{display:flex;gap:1.1cqi;font-family:var(--mono);font-size:.98cqi;color:var(--muted);align-items:center;white-space:nowrap}
+  .legend i{width:1.7cqi;height:0;border-top:2px solid;display:inline-block;margin-right:.35cqi;vertical-align:middle}
+  .legend .tc{border-top-style:dashed;border-color:var(--dim)}
+  .sw{width:.95cqi;height:.95cqi;border-radius:50%;display:inline-block;margin-right:.3cqi;vertical-align:middle}
+
+  /* ---- LEFT: event table ---- */
+  .table{grid-area:table;border-right:1px solid var(--line);padding:.7cqi .8cqi;display:flex;flex-direction:column;gap:.32cqi;overflow:hidden}
+  .table h3{font-family:var(--mono);font-size:.85cqi;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);margin:0 0 .1cqi}
+  .erow{border:1px solid var(--line);border-radius:.5cqi;padding:.3cqi .55cqi;background:var(--panel);opacity:.32;filter:saturate(.4);transition:.4s;display:flex;flex-direction:column;gap:.12cqi}
+  .erow.on{opacity:1;filter:none}
+  .erow.cur{border-color:var(--accent);box-shadow:0 0 2.4cqi -1cqi var(--accent);background:#8b7cff10}
+  .erow .l1{display:flex;justify-content:space-between;align-items:center;font-family:var(--mono);font-size:.7cqi;color:var(--dim)}
+  .erow .l2{font-family:var(--mono);font-size:.84cqi;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .erow .l2 .op{font-weight:700}
+  .op.causal{color:var(--accent)} .op.touch{color:var(--dim)} .op.slow{color:var(--slow)} .op.dirv{color:var(--arm)}
+  .erow .tag{font-family:var(--mono);font-size:.72cqi;align-self:flex-start;padding:.05cqi .45cqi;border-radius:.35cqi;border:1px solid var(--line2);color:var(--dim)}
+  .erow.on .tag.hit{color:var(--allow);border-color:#34d39955;background:#34d39912}
+  .erow.on .tag.warn{color:var(--arm);border-color:#fbbf2455;background:#fbbf2412}
+  .erow.on .tag.bad{color:var(--deny);border-color:#fb6f8455;background:#fb6f8412}
+
+  /* ---- RIGHT-TOP: graph ---- */
+  .graph{grid-area:graph;position:relative;margin:.9cqi 1.3cqi .3cqi;border:1px solid var(--line);border-radius:.9cqi;
+    background:radial-gradient(circle at 50% 40%, #ffffff06, transparent 70%), var(--bg2);overflow:hidden}
+  .glabel{position:absolute;top:.8cqi;left:1.1cqi;font-family:var(--mono);font-size:.85cqi;letter-spacing:.08em;text-transform:uppercase;color:var(--dim);z-index:3}
+  .wsbox{position:absolute;border:1.5px dashed var(--accent);border-radius:1.4cqi;opacity:0;transition:.5s;z-index:1;pointer-events:none}
+  .wsbox.on{opacity:.5}
+  .wslabel{position:absolute;font-family:var(--mono);font-size:.72cqi;color:var(--accent);opacity:0;transition:.5s;z-index:3}
+  .wslabel.on{opacity:.85}
+  .edges{position:absolute;inset:0;width:100%;height:100%}
+  .gedge{stroke:var(--line2);stroke-width:2;opacity:0;transition:opacity .5s ease}
+  .gedge.on{opacity:1}
+  .gedge.s1{stroke:var(--s1)} .gedge.slow{stroke:var(--slow)}
+  .gedge.touch{stroke:var(--dim);stroke-dasharray:4 4}
+  .gedge.denyE{stroke:var(--deny)}
+  .gnode{position:absolute;transform:translate(-50%,-50%) scale(.4);opacity:0;transition:.5s cubic-bezier(.34,1.4,.64,1);
+    width:5.4cqi;height:5.4cqi;border-radius:50%;border:1.5px solid var(--line2);background:var(--panel);
+    display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.08cqi;font-family:var(--mono);z-index:2;text-align:center;padding:.2cqi}
+  .gnode.on{opacity:1;transform:translate(-50%,-50%) scale(1)}
+  .gnode .k{font-size:.76cqi;font-weight:700;color:var(--ink);line-height:1.05}
+  .gnode .k2{font-size:.6cqi;color:var(--dim)}
+  .gnode.s1{border-color:var(--s1);background:#8b7cff18;box-shadow:0 0 3cqi -1cqi var(--s1)} .gnode.s1 .k2{color:var(--s1)}
+  .gnode.slow{border-color:var(--slow);background:#fb923c18;box-shadow:0 0 3cqi -1cqi var(--slow)} .gnode.slow .k2{color:var(--slow)}
+  .gnode.pin{box-shadow:0 0 3cqi -0.5cqi var(--allow), inset 0 0 0 1px var(--allow)}
+  .gnode.touch{border-style:dashed;border-color:var(--dim)} .gnode.touch .k2{color:var(--dim)}
+  .gnode.swept{border-style:dashed;border-color:var(--dim);opacity:.32 !important;filter:grayscale(.7)}
+  .gnode.swept .k2{color:var(--dim)}
+  .gnode.denyN{border-color:var(--deny);box-shadow:0 0 3cqi -0.5cqi var(--deny)} .gnode.denyN .k2{color:var(--deny)}
+
+  /* ---- pipe: working-set metrics ---- */
+  .pipe{grid-area:pipe;margin:0 1.3cqi;display:flex;align-items:center;gap:.7cqi;font-family:var(--mono);font-size:.82cqi}
+  .chip{border:1px solid var(--line2);border-radius:.5cqi;padding:.2cqi .6cqi;color:var(--dim);background:var(--panel);white-space:nowrap;transition:.3s}
+  .chip b{color:var(--ink);font-weight:700}
+  .chip.shipA{color:var(--allow);border-color:#34d39955;background:#34d39910}
+  .chip.actA{color:var(--accent);border-color:#8b7cff55;background:#8b7cff10}
+  .chip.pinA{color:var(--allow);border-color:#34d39955;background:#34d39910}
+  .chip.sweptA{color:var(--dim);border-color:var(--line2)}
+  .chip.karmA{color:var(--arm);border-color:#fbbf2455;background:#fbbf2410}
+  .chip.karmD{color:var(--deny);border-color:#fb6f8488;background:#fb6f8420}
+
+  /* ---- automata ---- */
+  .autos{grid-area:autos;margin:.35cqi 1.3cqi 0;display:flex;flex-direction:column;gap:.4cqi}
+  .aut{display:flex;flex-direction:column;gap:.2cqi}
+  .autohd{display:flex;justify-content:space-between;align-items:center;gap:1cqi}
+  .autohd .t{font-family:var(--mono);font-size:.8cqi;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .state{font-family:var(--mono);font-size:.8cqi;font-weight:700;letter-spacing:.05em;padding:.12cqi .6cqi;border-radius:.4cqi;border:1px solid var(--line2);color:var(--dim);flex:none}
+  .state.seeded{color:var(--accent);border-color:#8b7cff55;background:#8b7cff12}
+  .state.armed{color:var(--arm);border-color:#fbbf2588;background:#fbbf2420}
+  .state.ok{color:var(--allow);border-color:#34d39988;background:#34d39915}
+  .state.blocked{color:var(--deny);border-color:#fb6f8488;background:#fb6f8420}
+  .amrow{display:flex;gap:.45cqi;align-items:stretch}
+  .abit{flex:1;border:1.5px solid var(--line2);border-radius:.5cqi;background:var(--panel);padding:.26cqi .45cqi;display:flex;align-items:center;gap:.45cqi;transition:.4s;min-width:0}
+  .abit .box{width:1.3cqi;height:1.3cqi;border-radius:.35cqi;border:1.5px solid var(--line2);display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:.8cqi;color:var(--dim);flex:none;transition:.4s}
+  .abit .m{min-width:0}
+  .abit .m .tt{font-family:var(--mono);font-size:.84cqi;color:var(--ink);font-weight:600;display:block;line-height:1.05;white-space:nowrap}
+  .abit .m .pr{font-family:var(--mono);font-size:.64cqi;color:var(--dim);white-space:nowrap}
+  .abit.set{border-color:var(--allow);background:#34d3990e}
+  .abit.set .box{border-color:var(--allow);background:var(--allow);color:#06281c}
+  .abit.set .pr{color:var(--allow)}
+  .abit.blockstep.set{box-shadow:0 0 0 2px var(--deny)}
+  .abit.pinstep.set .box{border-color:var(--allow)}
+  .amfoot{display:flex;align-items:center;gap:.7cqi}
+  .mask{font-family:var(--mono);font-size:.82cqi;color:var(--muted);white-space:nowrap}
+  .mask b{color:var(--ink)}
+  .bar{flex:1;height:.85cqi;border-radius:1cqi;background:var(--panel2);border:1px solid var(--line);position:relative;overflow:visible}
+  .bar .fill{height:100%;width:0;border-radius:1cqi;background:linear-gradient(90deg,var(--accent),var(--cyan));transition:width .6s cubic-bezier(.4,0,.2,1)}
+  .bar .fill.warn{background:linear-gradient(90deg,var(--arm),#f59e0b)}
+  .bar .fill.crit{background:linear-gradient(90deg,var(--deny),var(--arm))}
+  .bar .tick{position:absolute;top:-.4cqi;bottom:-.4cqi;width:1.5px}
+  .bar .tick.a{left:30%;background:var(--arm)} .bar .tick.b{left:55%;background:var(--deny)}
+  .scoreN{font-family:var(--mono);font-size:.82cqi;color:var(--ink);min-width:3.4cqi;text-align:right}
+  .spacer{flex:1}
+
+  /* ---- narration ---- */
+  .note{grid-area:note;margin:.4cqi 1.3cqi .1cqi;font-family:var(--mono);font-size:.92cqi;line-height:1.36;color:var(--muted);
+    border-top:1px solid var(--line);padding-top:.5cqi;min-height:4.7cqi}
+  .note b{color:var(--ink)} .note .g{color:var(--allow)} .note .y{color:var(--arm)} .note .r{color:var(--deny)} .note .o{color:var(--slow)} .note .p{color:var(--accent)}
+
+  /* ---- rail ---- */
+  .rail{grid-area:rail;border-top:1px solid var(--line);display:flex;align-items:center;justify-content:flex-end;padding:0 1.3cqi;gap:.7cqi}
+  .nav{display:flex;gap:.6cqi;align-items:center}
+  .nav button{all:unset;cursor:pointer;font-family:var(--mono);font-size:1cqi;color:var(--muted);border:1px solid var(--line2);border-radius:.55cqi;padding:.26cqi .9cqi;transition:.2s;outline-offset:2px;white-space:nowrap}
+  .nav button:hover{color:var(--ink);border-color:var(--accent);background:#8b7cff14}
+  .nav button:focus-visible{outline:2px solid var(--accent)}
+  .nav .cnt{font-family:var(--mono);font-size:1.05cqi;color:var(--dim);padding:0 .5cqi}
+
+  /* ---- thuật ngữ click được + popup ---- */
+  .term{color:var(--ink);border-bottom:1px dashed var(--accent);cursor:pointer;transition:.15s}
+  .term:hover{color:var(--accent);background:#8b7cff14}
+  .pop-ov{position:absolute;inset:0;z-index:10;background:#05080dcc;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(2px)}
+  .pop-ov[hidden]{display:none}
+  .pop{width:min(54cqi,88%);max-height:82%;overflow:auto;background:var(--panel);border:1px solid var(--line2);border-radius:.9cqi;box-shadow:0 2cqi 6cqi -2cqi #000;padding:1.1cqi 1.3cqi}
+  .pop-hd{display:flex;justify-content:space-between;align-items:center;gap:1cqi;margin-bottom:.6cqi}
+  .pop-hd span{font-family:var(--mono);font-size:1.15cqi;font-weight:700;color:var(--accent);letter-spacing:.04em}
+  .pop-hd button{all:unset;cursor:pointer;font-family:var(--mono);font-size:1.05cqi;color:var(--dim);border:1px solid var(--line2);border-radius:.5cqi;padding:.12cqi .55cqi}
+  .pop-hd button:hover{color:var(--ink);border-color:var(--accent)}
+  .pop-b{font-family:var(--mono);font-size:.95cqi;line-height:1.55;color:var(--muted)}
+  .pop-b b{color:var(--ink)} .pop-b .g{color:var(--allow)} .pop-b .y{color:var(--arm)} .pop-b .r{color:var(--deny)}
+  .pop-b .p{color:var(--accent)} .pop-b .o{color:var(--slow)}
+  .pop-b code{color:var(--cyan);font-family:var(--mono)}
+  .pop-b .src{display:block;margin-top:.7cqi;font-size:.8cqi;color:var(--dim)}
+
+  @media (prefers-reduced-motion: reduce){*{transition-duration:.12s !important}}
+</style>
+</head>
+<body>
+  <div class="stage" id="stage" tabindex="0">
+    <div class="top">
+      <div class="brand"><span class="d"></span> Endpoint–Backend · Working-set · Chặn cục bộ</div>
+      <div class="legend">
+        <span><span class="sw" style="background:var(--s1)"></span>S1 (trong cửa sổ)</span>
+        <span><span class="sw" style="background:var(--slow)"></span>S2 low-and-slow</span>
+        <span>📌 pinned</span>
+        <span>▚ swept</span>
+        <span><i class="tc"></i>touch</span>
+      </div>
+    </div>
+
+    <!-- LEFT: event table -->
+    <div class="table">
+      <h3>Luồng event</h3>
+      <div class="erow" data-ev="1">
+        <div class="l1"><span>E1 · t=1000</span><span>causal</span></div>
+        <div class="l2"><span class="op causal">exec</span> explorer → powershell</div>
+        <div class="tag hit">⇒ T1059 · seed + bind 📌</div>
+      </div>
+      <div class="erow" data-ev="2">
+        <div class="l1"><span>E2 · t=1500</span><span>touch</span></div>
+        <div class="l2"><span class="op touch">open</span> powershell → scratch.tmp</div>
+        <div class="tag">⇒ warm · unbound</div>
+      </div>
+      <div class="erow" data-ev="3">
+        <div class="l1"><span>E3 · t=2000</span><span>causal</span></div>
+        <div class="l2"><span class="op causal">read</span> powershell → nhiều thư mục</div>
+        <div class="tag hit">⇒ T1083 · storyline-route</div>
+      </div>
+      <div class="erow" data-ev="4">
+        <div class="l1"><span>E4 · t=2400</span><span>causal</span></div>
+        <div class="l2"><span class="op causal">exec</span> powershell → vssadmin</div>
+        <div class="tag warn">⇒ T1490 · route entity MỚI · ARM</div>
+      </div>
+      <div class="erow" data-ev="5">
+        <div class="l1"><span>E5 · t=2700</span><span>causal</span></div>
+        <div class="l2"><span class="op causal">write</span> powershell → doc1 · entropy↑</div>
+        <div class="tag bad">⇒ T1486 · DENY cục bộ</div>
+      </div>
+      <div class="erow" data-ev="6">
+        <div class="l1"><span>E6 · t=302k</span><span>+5 phút</span></div>
+        <div class="l2"><span class="op slow">exec</span> attacker → mimikatz</div>
+        <div class="tag">⇒ gap &gt; W · S2 rời rạc</div>
+      </div>
+      <div class="erow" data-ev="7">
+        <div class="l1"><span>E7 · backend</span><span>correlate</span></div>
+        <div class="l2"><span class="op slow">stitch</span> ghép chuỗi qua gap</div>
+        <div class="tag warn">⇒ ArmDirective in-flight</div>
+      </div>
+      <div class="erow" data-ev="8">
+        <div class="l1"><span>E8 · t=305k</span><span>control ⇩</span></div>
+        <div class="l2"><span class="op dirv">directive</span> Arm(mimikatz·lsass)</div>
+        <div class="tag warn">⇒ ký · seq · TTL</div>
+      </div>
+      <div class="erow" data-ev="9">
+        <div class="l1"><span>E9 · t=305k</span><span>causal</span></div>
+        <div class="l2"><span class="op slow">read</span> mimikatz → lsass · VM_READ</div>
+        <div class="tag bad">⇒ DENY (backend-arm)</div>
+      </div>
+    </div>
+
+    <!-- RIGHT-TOP: graph -->
+    <div class="graph" id="graph">
+      <div class="glabel">Đồ thị @ backend (đầy đủ) · endpoint chỉ giữ storyline nhỏ trong working-set</div>
+      <div class="wsbox" id="wsbox" style="left:3%;top:6%;width:56%;height:86%"></div>
+      <div class="wslabel" id="wslabel" style="left:4%;top:2.5%">◇ working-set endpoint (S1)</div>
+      <svg class="edges" viewBox="0 0 100 100" preserveAspectRatio="none">
+        <line class="gedge s1"    data-ev="1" x1="10" y1="26" x2="30" y2="46" vector-effect="non-scaling-stroke"/>
+        <line class="gedge touch" data-ev="2" x1="30" y1="46" x2="13" y2="76" vector-effect="non-scaling-stroke"/>
+        <line class="gedge s1"    data-ev="4" x1="30" y1="46" x2="45" y2="16" vector-effect="non-scaling-stroke"/>
+        <line class="gedge s1 denyE" data-ev="5" x1="30" y1="46" x2="50" y2="70" vector-effect="non-scaling-stroke"/>
+        <line class="gedge slow denyE" data-ev="9" x1="74" y1="30" x2="88" y2="66" vector-effect="non-scaling-stroke"/>
+      </svg>
+      <div class="gnode s1"    data-ev="1" style="left:10%;top:26%"><span class="k">explorer</span><span class="k2">P0 · S1</span></div>
+      <div class="gnode s1 pin" data-ev="1" id="nPwsh" style="left:30%;top:46%"><span class="k">powershell</span><span class="k2">📌 P1 · S1</span></div>
+      <div class="gnode touch" data-ev="2" id="nScratch" style="left:13%;top:76%"><span class="k">scratch.tmp</span><span class="k2">touch · warm</span></div>
+      <div class="gnode s1"    data-ev="4" style="left:45%;top:16%"><span class="k">vssadmin</span><span class="k2">S1 · MỚI</span></div>
+      <div class="gnode s1 denyN" data-ev="5" style="left:50%;top:70%"><span class="k">doc1</span><span class="k2">DENY cục bộ</span></div>
+      <div class="gnode slow"  data-ev="6" style="left:74%;top:30%"><span class="k">mimikatz</span><span class="k2">S2 · rời rạc</span></div>
+      <div class="gnode slow denyN" data-ev="9" style="left:88%;top:66%"><span class="k">lsass</span><span class="k2">DENY · backend</span></div>
+    </div>
+
+    <!-- pipe: working-set metrics -->
+    <div class="pipe">
+      <span class="chip" id="cShip">▲ ship <b id="shipN">0</b></span>
+      <span class="chip" id="cAct">ACTIVE <b id="actN">0</b></span>
+      <span class="chip" id="cPin">📌 pinned <b id="pinN">0</b></span>
+      <span class="chip" id="cSwept">▚ swept <b id="sweptN">0</b></span>
+      <span class="spacer"></span>
+      <span class="chip" id="cKarm">kernel-arm <b id="karmN">∅</b></span>
+    </div>
+
+    <!-- automata -->
+    <div class="autos">
+      <div class="aut">
+        <div class="autohd"><span class="t" id="titA">A @ endpoint · S1 (ransomware, trong cửa sổ)</span><span class="state" id="stateA">IDLE</span></div>
+        <div class="amrow">
+          <div class="abit pinstep" id="a0"><div class="box">0</div><div class="m"><span class="tt">T1059 📌</span><span class="pr">prereq { }</span></div></div>
+          <div class="abit" id="a1"><div class="box">1</div><div class="m"><span class="tt">T1490</span><span class="pr">prereq { 0 }</span></div></div>
+          <div class="abit" id="a2"><div class="box">2</div><div class="m"><span class="tt">T1083</span><span class="pr">prereq { 0 }</span></div></div>
+          <div class="abit blockstep" id="a3"><div class="box">3</div><div class="m"><span class="tt">T1486 ⛒</span><span class="pr">prereq { 1,2 }</span></div></div>
+        </div>
+        <div class="amfoot"><span class="mask">mask <b id="maskA">0000</b></span><div class="bar"><span class="tick a"></span><span class="tick b"></span><span class="fill" id="fillA"></span></div><span class="scoreN" id="scoreA">0.0</span></div>
+      </div>
+      <div class="aut">
+        <div class="autohd"><span class="t" id="titB">A′ @ backend · low-and-slow S2 (không cửa sổ)</span><span class="state" id="stateB">—</span></div>
+        <div class="amrow">
+          <div class="abit" id="b0"><div class="box">0</div><div class="m"><span class="tt">exec tool</span><span class="pr">prereq { }</span></div></div>
+          <div class="abit blockstep" id="b1"><div class="box">1</div><div class="m"><span class="tt">T1003 ⛒ LSASS</span><span class="pr">prereq { 0 }</span></div></div>
+          <div class="abit" style="opacity:.25"><div class="box">·</div><div class="m"><span class="tt">— </span><span class="pr">(endpoint mù chuỗi này)</span></div></div>
+        </div>
+        <div class="amfoot"><span class="mask">mask <b id="maskB">00</b></span><span class="spacer"></span><span class="scoreN" id="scoreB">0.0</span></div>
+      </div>
+    </div>
+
+    <!-- narration -->
+    <div class="note" id="note"></div>
+
+    <!-- popup giải thích thuật ngữ -->
+    <div class="pop-ov" id="popov" hidden>
+      <div class="pop">
+        <div class="pop-hd"><span id="popT"></span><button id="popX" aria-label="Đóng">✕</button></div>
+        <div class="pop-b" id="popB"></div>
+      </div>
+    </div>
+
+    <!-- rail -->
+    <div class="rail">
+      <div class="nav">
+        <button id="reset" aria-label="Reset">↺</button>
+        <button id="prev" aria-label="Lùi">‹</button>
+        <span class="cnt" id="cnt">0 / 9</span>
+        <button id="next" aria-label="Thêm event">Thêm event ›</button>
+      </div>
+    </div>
+  </div>
+
+<script>
+(() => {
+  const stage = document.getElementById('stage');
+  const TOTAL = 9;
+  let s = 0;
+
+  // A @ endpoint (S1 ransomware, 4 bit) — chặn CỤC BỘ tại E5
+  const BITA = {0:[0,0,0,0],1:[1,0,0,0],2:[1,0,0,0],3:[1,0,1,0],4:[1,1,1,0],5:[1,1,1,1],6:[1,1,1,1],7:[1,1,1,1],8:[1,1,1,1],9:[1,1,1,1]};
+  const SCA  = {0:'0.0',1:'4.1',2:'4.1',3:'6.9',4:'12.1',5:'18.8',6:'18.8',7:'18.8',8:'18.8',9:'18.8'};
+  const WIDA = {0:0,1:20,2:20,3:34,4:60,5:94,6:94,7:94,8:94,9:94};
+  const STA  = {0:['IDLE',''],1:['SEEDED','seeded'],2:['SEEDED','seeded'],3:['SEEDED','seeded'],
+                4:['ARMED cục bộ','armed'],5:['BLOCKED cục bộ','blocked'],6:['BLOCKED','blocked'],
+                7:['BLOCKED','blocked'],8:['BLOCKED','blocked'],9:['BLOCKED','blocked']};
+  // A' @ backend (2 bit: exec tool, read LSASS) — chỉ chạy cho chuỗi low-and-slow
+  const BITB = {0:[0,0],1:[0,0],2:[0,0],3:[0,0],4:[0,0],5:[0,0],6:[1,0],7:[1,0],8:[1,0],9:[1,1]};
+  const SCB  = {0:'0.0',1:'0.0',2:'0.0',3:'0.0',4:'0.0',5:'0.0',6:'5.0',7:'9.0',8:'9.0',9:'14.0'};
+  const STB  = {0:['—',''],1:['—',''],2:['—',''],3:['—',''],4:['—',''],5:['—',''],
+                6:['CORRELATE','seeded'],7:['ARM ⇩','armed'],8:['ARM ⇩','armed'],9:['DENY','blocked']};
+
+  const SHIP  = {0:0,1:1,2:2,3:3,4:4,5:5,6:6,7:6,8:7,9:8};   // MỌI event đều ship (E7 là xử lý backend)
+  const ACT   = {0:0,1:2,2:3,3:3,4:3,5:4,6:3,7:3,8:3,9:4};   // working-set node endpoint — LUÔN bounded
+  const PIN   = {0:0,1:1,2:1,3:1,4:1,5:1,6:0,7:0,8:1,9:1};   // refcount>0 (bound identities)
+  const SWEPT = {0:0,1:0,2:0,3:0,4:1,5:1,6:1,7:1,8:1,9:1};   // scratch.tmp bị sweep tại E4
+  const KARM  = {0:'∅',1:'∅',2:'∅',3:'∅',4:'S1·write (local)',5:'S1·write → DENY ✓',
+                 6:'—',7:'—',8:'mimikatz·lsass',9:'mimikatz·lsass → DENY ✓'};
+
+  const NOTE = {
+    0:'Bản làm lại — phân tích thẳng từ <b>engine.md</b>: endpoint <b>nhanh · nhẹ · chính xác</b>, backend gánh forensic (chỗ đồ thị nở vô hạn, engine.md §13.1). 9 bước phủ các edge: <span class="term" data-k="shipforget">ship-and-forget</span>, <span class="term" data-k="workingset">bất biến working-set</span>, <span class="term" data-k="routing">định tuyến qua storyline</span>, <span class="term" data-k="sweep">sweep node nguội</span>, <span class="term" data-k="seggc">GC theo seg_window</span>, <span class="term" data-k="nodsu">storyline không DSU</span>, <span class="term" data-k="localblock">chặn cục bộ (không cửa sổ trễ)</span>, <span class="term" data-k="window">chân trời W</span>, <span class="term" data-k="backendarm">backend-arm</span>, <span class="term" data-k="kdeny">DENY kernel</span>. Bấm <b>→</b>.',
+    1:'E1 <b>exec</b>: <span class="p">S1</span> mới, T1059 khớp bước gốc → seed automaton A qua <code>PATTERN_TRIGGER</code> (đúng engine.md §5.3, không cổng lọc nào chen giữa). Bước gốc <b>bind actor</b> powershell → <span class="g">📌 refcount=1</span>: node bị GHIM, bất khả sweep (§3a). ACTIVE=2.',
+    2:'E2 <b>open</b> (touch, không causal): scratch.tmp vào ACTIVE dạng <b>warm · unbound</b> (refcount 0). Cạnh chỉ được <b>SHIP rồi quên</b> — endpoint không lưu edge (§0,§4). Đồ thị bạn thấy là bản <b>backend</b>. ACTIVE=3.',
+    3:'E3 <b>read</b> nhiều thư mục = T1083. vssadmin? chưa — đây là discovery trên chính powershell. Event <b>định tuyến qua storyline</b>: <code>powershell.line → S1 → S1.automata</code> → A. <span class="g">bit2</span>. Chạm powershell làm <b>tươi last_touch</b> (giữ ấm chuỗi đang sống).',
+    4:'E4 <b>exec</b> vssadmin — thực thể <b>MỚI TOANH</b>, A chưa từng bind. Nó vào đúng A nhờ <span class="p">storyline</span> (con nhân-quả của powershell, LINK merge). <span class="g">bit1</span>, score 12.1 ≥ <span class="r">θ_block</span>, T1486 pending → <span class="y">ARM cục bộ</span> (scope=identity trong S1). Đồng thời scratch.tmp quá <b>cửa sổ W</b> + refcount 0 → <b>▚ SWEPT</b>: rời endpoint, backend vẫn giữ, <b>detection không mất gì</b>. ACTIVE giữ 3 (thêm vssadmin, bớt scratch).',
+    5:'E5 <b>write</b> doc1 entropy↑ = T1486. doc1 lại là thực thể mới → định tuyến qua storyline → prereq{1,2} ✓ → <span class="g">bit3</span> ACCEPT. Đúng bước <code>block_at</code> mà kernel đã ARM → <span class="r">DENY NGAY TRONG KERNEL</span>, <b>write mã hoá đầu tiên không chạm đĩa</b>. Toàn bộ chuỗi chặn <b>cục bộ, không một round-trip mạng</b> — đây là nhanh/nhẹ/chính xác.',
+    6:'E6 (<b>+5 phút</b>): một chuỗi khác — <span class="o">exec mimikatz</span>. Tiền tố của nó cách quá <b>W</b> nên node dẫn đã bị sweep → endpoint tạo <span class="o">S2 rời rạc</span>, <b>không nối được</b> (đúng khế ước: ngoài cửa sổ = việc backend). Nhưng event vẫn được <b>ship</b>. Backend A′ (không cửa sổ) ghép được tiền tố → <span class="g">bit0</span>.',
+    7:'E7 <b>backend stitch</b>: trên đồ thị đầy đủ không deadline, backend nối chuỗi qua khoảng gap 5 phút mà endpoint bỏ. A′ đủ điểm + còn bước LSASS enforceable chờ → phát <span class="y">⇩ ArmDirective(mimikatz·lsass)</span> — <b>in-flight</b>, mất một round-trip.',
+    8:'E8 <span class="y">⇩ directive tới endpoint</span>: verify <b>chữ ký + seq đơn điệu + TTL (lease)</b>, dưới trần sanity (§9) → ghi kernel-arm theo <b>identity</b> tiến trình mimikatz (không theo path). Backend chỉ <b>chuẩn bị trạng thái</b>, không tự chặn.',
+    9:'E9 mimikatz <b>read lsass · VM_READ</b> → kernel khớp arm identity → <span class="r">DENY</span>. Đây là ca <b>backend-delegated</b>: trả bằng <b>cửa sổ trễ</b> (E6→E8) — hành động trong cửa sổ đó mới lọt, giới hạn vật lý (§11). Tương phản E5: chuỗi trong-cửa-sổ chặn cục bộ tức thì; chuỗi low-and-slow do backend cứu.'
+  };
+
+  const TERMS = {
+    seggc:{t:'GC theo seg_window',b:'engine.md §5.6 <b>định nghĩa</b> deadline cục bộ theo đoạn (<code>seg_window</code>) nhưng §13.1 thừa nhận <b>chưa hiện thực GC</b> — automaton không bị xoá sau khi hết hạn → phình. Bản làm lại <b>hiện thực</b> nó: automaton mà mọi bước kế tiếp đều đã quá <code>seg_window</code> tính từ <code>t_enabled</code> (không còn qua được <code>SEG_WINDOW_OK</code>) → xoá khỏi storyline.<br><br>Mắt xích với working-set: khi GC một automaton, nó <b>nhả refcount</b> các identity đã bind → node hết ghim, nguội thì bị sweep. Nhờ đó số automaton sống bị kẹp bởi <code>seed_rate × seg_window</code> — đây là chỗ khép vòng đời bộ nhớ endpoint.<span class="src">engine.md §5.6, §13.1 · engine_endpoint_backend.md §6(c)</span>'},
+    shipforget:{t:'Ship-and-forget (endpoint không dựng graph)',b:'Nguyên nhân graph nở vô hạn là endpoint lưu <b>cạnh</b> forensic. Ở đây mỗi event chỉ: <b>(1)</b> cập nhật LINK (merge nhân-quả nếu causal), <b>(2)</b> cập nhật bộ đếm tagger, <b>(3)</b> <code>SHIP</code> nguyên event lên backend — rồi <b>quên</b>. Cạnh <b>không tồn tại</b> trong bất kỳ cấu trúc cục bộ nào.<br><br>Bước <code>ADD_EDGE</code> của engine gốc biến mất, thay bằng <code>SHIP</code>. Đồ thị mà SOC xem được dựng <b>hoàn toàn ở backend</b> — panel đồ thị ở đây ghi "@ backend (đầy đủ)". Đây là điều khử thẳng số hạng bộ nhớ lớn nhất (~50B/cạnh × hoạt động).<span class="src">engine_endpoint_backend.md §0, §4</span>'},
+    workingset:{t:'Bất biến working-set',b:'engine.md §13.1 thừa nhận: không có GC/eviction/trần → chạy dài trên event thật thì <b>phình vô hạn / OOM</b>. Thay vì thêm một <i>chính sách</i> dọn dẹp (ai bị bỏ, theo tiêu chí nào — mỗi lựa chọn là một edge case), endpoint giữ một <b>bất biến duy nhất</b>:<br><br>&nbsp;&nbsp;<b>Giữ thực thể e ⟺ e.refcount &gt; 0 (đang bị automaton bind) HOẶC e.last_touch ≥ now − W.</b><br><br>Ba hệ quả: <b>(a)</b> node bị bind có refcount&gt;0 → bất khả bỏ → <span class="g">tiến độ automaton không bao giờ mất vì áp lực bộ nhớ</span>; <b>(b)</b> node nguội-không-bind bỏ đi an toàn (không detection nào phụ thuộc, backend vẫn giữ); <b>(c)</b> cái đáng theo dõi tự ghim mình (mẫu bind ngay tại bước gốc).<br><br>Cận: <code>|ACTIVE| ≤ automata_sống × arity_bind + event_rate × W</code> — hằng số cấu hình → <b>RAM phẳng</b>, không cần bất kỳ chính sách eviction nào.<span class="src">engine_endpoint_backend.md §3</span>'},
+    routing:{t:'Định tuyến event → automaton (hai kiểu)',b:'Endpoint <b>vẫn có storyline</b> — nó chính là bộ định tuyến. Có hai kiểu, cho hai tình huống:<br><br><b>1 · Theo identity (<code>BIND_IDX</code>):</b> khi event xảy ra trên <b>đúng thực thể automaton đã bind</b>. Ví dụ dropper: <code>exec X</code> tra thẳng ra automaton đã <code>bind X</code>. Không cần storyline.<br><br><b>2 · Theo storyline (phân hoạch nhân-quả):</b> khi step ở trên một <b>thực thể MỚI</b>, chưa bind, nhưng cùng chuỗi. Ví dụ E4 (vssadmin) và E5 (doc1): đều là thực thể chưa từng thấy → vào đúng A nhờ <code>entity.line → S1 → S1.automata</code>. <code>BIND_IDX</code> bất lực ở đây; storyline là thứ kéo event trên thực thể lạ về đúng automaton.<br><br>Điểm tinh tế: dựng storyline <b>không cần đồ thị lịch sử</b> — quan hệ nhân-quả nằm ngay trong event hiện tại (actor→object), <code>LINK</code> lấy cạnh sống đó, cập nhật phân hoạch, rồi ship cạnh đi.<span class="src">engine_endpoint_backend.md §5</span>'},
+    sweep:{t:'Sweep node nguội',b:'Trong walkthrough, scratch.tmp (E2, <b>touch · unbound</b>) tới E4 thì vượt cửa sổ <b>W</b> và vẫn refcount 0 → bị <b>sweep</b> khỏi <code>ACTIVE</code>. Quan sát:<br><br>• Bản forensic của nó <b>đã ship</b> → backend giữ trọn → <span class="g">không mất mát điều tra</span>.<br>• Không automaton nào bind nó → <span class="g">không mất tiến độ phát hiện</span>.<br>• Chip <code>ACTIVE</code> nhờ vậy <b>giữ phẳng</b> (E4: thêm vssadmin, bớt scratch → vẫn 3) — minh hoạ RAM bounded.<br><br>Cốt lõi: cái bị bỏ <b>không bao giờ là trạng thái phát hiện</b> — chỉ là node graph mà backend mới là chủ sở hữu thật. Nếu thực thể bị chạm lại về sau, nó được tạo mới (identity ổn định); mẫu nào cần nó thì đã tự ghim từ trước (§3c) nên không rơi vào diện sweep.<span class="src">engine_endpoint_backend.md §3(b)</span>'},
+    nodsu:{t:'Storyline = tập nhỏ, không union-find',b:'Engine gốc dùng DSU trên <b>mọi</b> node — DSU không xoá gọn (phải tombstone/rebuild, điểm khó nhất). Ở đây storyline là <b>tập tường minh có trần</b> <code>{members, automata, ttp_ring}</code>:<br><br>• Merge = union-by-size, chi phí O(tập nhỏ), có trần <code>MAX_NODES_PER_SID</code>.<br>• Xoá gọn: bỏ member nguội = <code>remove</code> khỏi set + ACTIVE; storyline hết member và hết automaton → tự tiêu. Không tombstone, không rebuild.<br><br>Đúng được vì tương quan toàn-lịch-sử là việc backend; endpoint chỉ tương quan trong working set nhỏ → tập tường minh là đủ.<br><br><b>Hub</b> (services.exe…): chạm trần merge thì endpoint <b>không merge</b>, để backend khâu — một trần + một fallback, thay cho hub-split/link_weak/per-root-budget.<span class="src">engine_endpoint_backend.md §5</span>'},
+    localblock:{t:'Chặn cục bộ — không cửa sổ trễ',b:'Điểm mạnh đầu bảng của kiến trúc: với chuỗi mà bằng chứng nằm gọn <b>trong cửa sổ</b>, endpoint tự đi hết từ seed → arm → <b>DENY trong kernel</b> mà <b>không một round-trip mạng nào</b>. Trong walkthrough: E1→E5 chặn write mã hoá <b>đầu tiên</b> ngay tại chỗ (tương phản E9 phải chờ backend-arm).<br><br>Vì thế: <b>mẫu nào cần chặn hành-động-đầu-tiên PHẢI khớp được bằng state cục bộ</b> (nằm trong rule endpoint). Đây là tiêu chí quyết định pattern nào bắt buộc ở endpoint chứ không chỉ backend.<br><br>Precision đến từ: đa-tactic mới chặn + bind theo identity + chỉ chặn tại <code>block_at</code> + endpoint chỉ tự chặn theo matcher của chính nó (§7).<span class="src">engine_endpoint_backend.md §1, §7, §11</span>'},
+    window:{t:'Chân trời tương quan W',b:'Cửa sổ working-set <b>W</b> vừa là ranh giới bộ nhớ, vừa là <b>chân trời tương quan</b> của endpoint — và hai vai này tự nhất quán:<br><br>• Chuỗi <b>đang sống</b> tự làm tươi <code>last_touch</code> các actor của nó ở mỗi bước → ở lại working set → khớp cục bộ (E1–E5).<br>• Chuỗi có <b>khoảng lặng &gt; W</b> giữa các đoạn → node dẫn nguội, bị sweep → bước sau khởi tạo storyline mới, <span class="o">endpoint mù</span> → rơi xuống backend (E6).<br><br>Nới <code>W</code> = bắt chuỗi dài hơn tại chỗ, đổi bằng RAM (<code>event_rate × W</code>) — <b>một</b> núm đánh đổi trực giác, trực tiếp giữa recall cục bộ và bộ nhớ.<span class="src">engine_endpoint_backend.md §11, §14</span>'},
+    backendarm:{t:'Backend-arm (thực thi cái backend phát hiện)',b:'Backend không có verdict đồng bộ — kết luận của nó đi xuống dưới dạng <b>thay đổi trạng thái</b> endpoint:<br><br>• <code>ArmDirective{scope:identity, action, ttl, seq}</code> — deny action khi chạm identity.<br>• <code>WatchDirective</code> — mềm hơn: cộng điểm để matcher <b>cục bộ</b> tự vượt ngưỡng (mớm, không phán thay).<br><br>An toàn kênh (bề mặt tấn công mới — arm giả = DoS chặn nhầm): mTLS + <b>ký từng directive</b>, <code>seq</code> đơn điệu (bỏ replay), <b>TTL lease</b> (mất backend thì arm tự tan), <b>trần sanity</b> per-host/root. Arm luôn theo <b>identity</b>, rename vô hiệu.<span class="src">engine_endpoint_backend.md §8, §9</span>'},
+    kdeny:{t:'DENY trong kernel',b:'Cả hai ca chặn (E5 cục bộ, E9 backend-arm) đều thi hành ở <b>cùng một chỗ</b>: kernel tra bảng arm (hash nonpaged, khoá identity) tại hook đồng bộ — minifilter pre-op cho write, <code>ObRegisterCallbacks</code> cho mở handle process (strip <code>VM_READ</code>) — và trả <code>STATUS_ACCESS_DENIED</code> tại chỗ.<br><br>Khác biệt chỉ ở <b>ai chuẩn bị trạng thái arm</b>: E5 do chính endpoint (không trễ); E9 do backend đẩy xuống (trễ một RTT). Đường thi hành thì giống hệt — không round-trip userland nào trên đường chặn.<span class="src">engine.md §8, §8.1 · engine_endpoint_backend.md §9</span>'}
+  };
+  const popov = document.getElementById('popov');
+  const openPop = k => { const d = TERMS[k]; if(!d) return;
+    document.getElementById('popT').textContent = d.t;
+    document.getElementById('popB').innerHTML = d.b;
+    popov.hidden = false; };
+  const closePop = () => { popov.hidden = true; };
+  document.getElementById('note').addEventListener('click', e=>{
+    const t = e.target.closest('.term'); if(t) openPop(t.dataset.k);
+  });
+  popov.addEventListener('click', e=>{ if(!e.target.closest('.pop')) closePop(); });
+  document.getElementById('popX').addEventListener('click', closePop);
+
+  function setBits(pre, arr){
+    arr.forEach((v,i)=>document.getElementById(pre+i).classList.toggle('set', !!v));
+  }
+
+  function render(){
+    document.querySelectorAll('.erow').forEach(el=>{
+      const e = +el.dataset.ev;
+      el.classList.toggle('on', e<=s);
+      el.classList.toggle('cur', e===s);
+    });
+    document.querySelectorAll('.gnode,.gedge').forEach(el=>{
+      el.classList.toggle('on', +el.dataset.ev <= s);
+    });
+    // working-set box hiện khi S1 sống
+    document.getElementById('wsbox').classList.toggle('on', s>=1 && s<=5);
+    document.getElementById('wslabel').classList.toggle('on', s>=1 && s<=5);
+    // sweep scratch.tmp tại E4
+    const scr = document.getElementById('nScratch');
+    scr.classList.toggle('swept', s>=4);
+    scr.querySelector('.k2').textContent = s>=4 ? '▚ SWEPT → backend' : 'touch · warm';
+    // powershell bỏ ghim sau khi chuỗi bị chặn xong
+    document.getElementById('nPwsh').classList.toggle('pin', s>=1 && s<=5);
+
+    setBits('a', BITA[s]); setBits('b', BITB[s]);
+    document.getElementById('maskA').textContent = ''+BITA[s][3]+BITA[s][2]+BITA[s][1]+BITA[s][0];
+    document.getElementById('maskB').textContent = ''+BITB[s][1]+BITB[s][0];
+    document.getElementById('scoreA').textContent = SCA[s];
+    document.getElementById('scoreB').textContent = SCB[s];
+    const fill = document.getElementById('fillA');
+    fill.style.width = WIDA[s]+'%';
+    fill.classList.toggle('warn', s===3||s===4);
+    fill.classList.toggle('crit', s>=5);
+
+    const [ta,ca] = STA[s]; const stA = document.getElementById('stateA');
+    stA.textContent = ta; stA.className = 'state '+ca;
+    const [tb,cb] = STB[s]; const stB = document.getElementById('stateB');
+    stB.textContent = tb; stB.className = 'state '+cb;
+
+    document.getElementById('shipN').textContent  = SHIP[s];
+    document.getElementById('actN').textContent   = ACT[s];
+    document.getElementById('pinN').textContent   = PIN[s];
+    document.getElementById('sweptN').textContent = SWEPT[s];
+    document.getElementById('karmN').textContent  = KARM[s];
+    document.getElementById('cShip').className  = 'chip' + (SHIP[s]>0 ? ' shipA':'');
+    document.getElementById('cAct').className   = 'chip' + (ACT[s]>0 ? ' actA':'');
+    document.getElementById('cPin').className   = 'chip' + (PIN[s]>0 ? ' pinA':'');
+    document.getElementById('cSwept').className = 'chip' + (SWEPT[s]>0 ? ' sweptA':'');
+    document.getElementById('cKarm').className  = 'chip' + ((s===5||s===9) ? ' karmD' : ((s===4||s===8) ? ' karmA':''));
+
+    document.getElementById('note').innerHTML = NOTE[s];
+    document.getElementById('cnt').textContent = s + ' / ' + TOTAL;
+    document.getElementById('prev').disabled = s===0;
+  }
+
+  const next = () => { if(s<TOTAL){s++;render();} };
+  const prev = () => { if(s>0){s--;render();} };
+  document.getElementById('next').addEventListener('click', e=>{e.stopPropagation();next();});
+  document.getElementById('prev').addEventListener('click', e=>{e.stopPropagation();prev();});
+  document.getElementById('reset').addEventListener('click', e=>{e.stopPropagation();s=0;render();});
+  window.addEventListener('keydown', e=>{
+    if(e.key==='Escape'){closePop();return;}
+    if(!popov.hidden){closePop();}
+    if(['ArrowRight',' ','Enter','PageDown'].includes(e.key)){e.preventDefault();next();}
+    else if(['ArrowLeft','PageUp','Backspace'].includes(e.key)){e.preventDefault();prev();}
+    else if(e.key==='Home'){s=0;render();}
+    else if(e.key==='End'){s=TOTAL;render();}
+    else if(e.key.toLowerCase()==='r'){s=0;render();}
+  });
+
+  stage.focus(); render();
+})();
+</script>
+</body>
+</html>

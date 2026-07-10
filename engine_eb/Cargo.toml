@@ -1,0 +1,21 @@
+[package]
+name = "edr-engine-eb"
+version = "0.1.0"
+edition = "2021"
+description = "Endpoint–backend split detection core (engine_endpoint_backend.md): lean endpoint + forensic backend"
+
+# Reuses the pure event/pattern/rules/dataset model of the base crate; the endpoint
+# and backend halves are implemented here. Zero external dependencies, like the base.
+[dependencies]
+edr-engine = { path = "../engine" }
+
+[[bin]]
+name = "edr-eb-replay"
+path = "src/main.rs"
+
+[lib]
+name = "edr_engine_eb"
+path = "src/lib.rs"
+
+[profile.release]
+opt-level = 3

@@ -266,6 +266,8 @@ hợp**, không chỉ rarity đơn lẻ.
 Lưu ý DSU: union-find **không xoá gọn** — evict node đã merge cần tombstoning hoặc rebuild định kỳ
 (tăng dần, **không** stop-the-world để tránh spike latency). Đây là điểm khó nhất khi hiện thực.
 
+> Đặc tả thay đổi **chi tiết đến mức struct/hàm** cho Hướng 1+2+3 (lõi của stack §7): xem **§11**.
+
 ---
 
 ## 10. Cách kiểm chứng
@@ -280,3 +282,259 @@ Lưu ý DSU: union-find **không xoá gọn** — evict node đã merge cần to
   **fail toward detection**.
 
 > Các tiêu chí này nên thành test hành vi mới trong `engine/tests/`, song song 4 test hiện có.
+
+---
+
+## 11. Đặc tả hiện thực chi tiết — Hướng 1 + 2 + 3
+
+Mục này chuyển ba hướng lõi thành thay đổi cụ thể trên prototype (`engine/src/`). Trạng thái hiện
+tại (điểm xuất phát):
+
+- `lib.rs`: `Node { key, sid }` sống trong `nodes: Vec<Node>` (uid = chỉ số vec, **không xoá được**);
+  `node_index: HashMap<NodeKey, usize>`; `Storyline { automata, ttp_history, score, last_activity }`;
+  `Automaton { completed_mask, step_ts, bound_nodes: HashMap<String, usize /*uid*/>, armed }`;
+  DSU `dsu_parent` + `find()` / `merge()`; `rate: HashMap<usize /*a_uid*/, RateState>`;
+  `kernel_arm: HashMap<usize /*sid*/, Op>`.
+- Không có eviction/GC nào — mọi thứ chỉ tăng.
+
+### 11.0 Refactor nền (bắt buộc trước): bind theo **identity**, không theo uid
+
+Điều kiện để collapse/rehydrate (Hướng 1) rẻ là automaton **không được trỏ vào node object**.
+Hiện `Automaton.bound_nodes` giữ `uid` (chỉ số vào `nodes`) — evict node là gãy binding.
+
+**Thay đổi:**
+
+```rust
+// lib.rs — Automaton
+- bound_nodes: HashMap<String, usize>,          // role -> uid
++ bound_ids:   HashMap<String, NodeKey>,        // role -> identity (FileId / (pid,start))
+```
+
+Điểm chạm (đều là so sánh tương đương, không đổi ngữ nghĩa):
+
+| Chỗ sửa | Trước | Sau |
+|---|---|---|
+| `try_commit` BINDING_OK | `existing != uid` | `existing != *key` (so `NodeKey`) — nguồn key: `RoleSource::Object → &e.object`, `Actor → &e.actor`, `Image → e.image_key()` |
+| `try_commit` `Scope::SameActor` | `bound_nodes.values().any(\|&u\| u == a_uid)` | `bound_ids.values().any(\|k\| k == &e.actor)` |
+| `merge()` gộp automaton | `bound_nodes.entry(role).or_insert(uid)` | `bound_ids.entry(role).or_insert(key)` |
+
+Sau refactor này `try_commit` **không cần** `a_uid/o_uid/img_uid` nữa (bớt 3 tham số); node graph
+chỉ còn phục vụ forensic + tra sid — đúng ranh giới HOT/COLD của Hướng 1.
+
+### 11.1 Hướng 1 — Tách HOT/COLD + collapse/rehydrate
+
+#### (a) Cấu trúc mới (file mới `state.rs` đề xuất)
+
+```rust
+pub struct AutomatonSketch {
+    pub pattern_id: String,
+    pub completed_mask: Mask,
+    pub step_ts: Vec<(u8, u64)>,            // chỉ mốc của bit đã set (compact)
+    pub bound_ids: HashMap<String, NodeKey>,
+    pub armed: bool,
+    pub score: f64,
+    pub last_activity: u64,
+}
+
+pub struct Hot {
+    sketches: HashMap<SketchKey, AutomatonSketch>,   // SketchKey = (root_id, pattern_id)
+    by_identity: HashMap<NodeKey, Vec<SketchKey>>,   // index rehydrate: identity -> sketches chờ
+}
+```
+
+`step_ts` compact đủ để: (1) `SEG_WINDOW_OK` tiếp tục đúng khi rehydrate, (2) `kill_chain_score`
+tính lại nguyên vẹn (nó chỉ đọc `completed_mask` + `step_ts` + pattern — xem `kill_chain_score()`
+trong `lib.rs`). `ttp_history` **không** đưa vào sketch (scoring không dùng nó; chỉ forensic cần).
+
+#### (b) COLD phải xoá được: đổi `nodes: Vec<Node>` thành slab
+
+```rust
+struct NodeSlot { key: NodeKey, sid: usize }
+nodes: Vec<Option<NodeSlot>>,   // slab + free-list
+free:  Vec<usize>,
+```
+
+Evict node = `nodes[uid] = None` + đẩy `uid` vào `free` + `node_index.remove(&key)` +
+`rate.remove(&uid)` (RateState treo theo uid — **phải dọn cùng lúc**, không thì leak).
+`resolve()` cấp uid từ `free` trước khi push mới.
+
+#### (c) COLLAPSE — chưng cất trước khi bỏ
+
+```text
+COLLAPSE_STORYLINE(sid):
+    s = storylines[sid]
+    for (pid, a) in s.automata where IS_SUSPICIOUS(a, s):     # tiêu chí ở 11.2(b)
+        hot.insert((root_of(sid), pid), sketch_from(a, s.score, s.last_activity))
+        for key in a.bound_ids.values(): hot.by_identity[key].push(sketch_key)
+    # phần bỏ: mọi node/edge/index thuộc sid + ttp_history + rate của các uid đó
+    for uid in members[sid]: free_node(uid)
+    storylines.remove(sid); members.remove(sid); dead_sids.insert(sid)
+```
+
+Cần thêm **reverse index** `members: HashMap<usize /*sid*/, Vec<usize /*uid*/>>` — cập nhật tại
+`resolve()` (thêm uid vào sid mới) và `merge()` (nối `members[child]` vào `members[root]`, O(|child|)
+amortized). Đây chính là lời giải "DSU không xoá gọn" ở §9: không rebuild DSU, chỉ cần biết
+*node nào thuộc storyline nào* để dọn trọn gói; `dsu_parent` entry chết giữ lại làm tombstone
+(`dead_sids`), dọn dần trong vòng GC nền, **không** stop-the-world.
+
+#### (d) REHYDRATE — móc vào `on_event()`
+
+Đặt ngay sau `resolve(actor/object/image)`, trước `advance()`:
+
+```text
+REHYDRATE(e, sid):
+    for key in [e.actor, e.object, e.image_key()?]:
+        for sk in hot.by_identity.remove(key) or []:
+            sketch = hot.sketches.remove(sk)
+            s = storylines[sid]                       # storyline hiện hành của event
+            s.automata.entry(sketch.pattern_id)
+                      .merge_or_insert(automaton_from(sketch))   # gộp mask/ts như merge() hiện có
+            if sketch.armed: kernel_arm[sid] = ...    # khôi phục arm
+            # gỡ sk khỏi by_identity của các identity còn lại
+```
+
+Chi phí: 1 tra hash/identity/event khi **miss** (hầu hết event, `by_identity` rỗng cho key đó) —
+O(1) đúng cam kết §1.5. Node của storyline cũ **không** dựng lại; chỉ automaton sống lại và tiếp
+tục `try_commit` bằng identity (nhờ 11.0).
+
+### 11.2 Hướng 2 — Priority retention thay LRU thuần
+
+#### (a) Tier — cụ thể hoá hàm priority thành 4 bậc
+
+Không cần hàm điểm liên tục + heap; 4 bucket là đủ và rẻ:
+
+```text
+T3 STICKY  : automaton armed == true, hoặc s.score >= θ_alert(pattern)   # bất khả evict
+T2 SUSPECT : automaton đã qua >= 2 bước, hoặc chạm TTP rarity >= ρ_anchor,
+             hoặc đang giữ bound_ids không rỗng
+T1 SEEDED  : có automaton nhưng mới 1 bước (mới seed)
+T0 PLAIN   : storyline không automaton (chỉ graph forensic)
+```
+
+`tier(sid)` tính từ dữ liệu sẵn có trong `Storyline`/`Automaton`; lưu cache `tier: u8` trong
+`Storyline`, cập nhật tại đúng 2 chỗ đã sửa trạng thái: cuối `try_commit()` (tiến bộ → có thể thăng
+T1→T2) và trong `rescore_and_emit()` (score vượt `theta_alert` hoặc set `armed` → T3).
+
+#### (b) `IS_SUSPICIOUS` (dùng ở COLLAPSE, 11.1c) = `tier >= T1` — nghĩa là **mọi automaton đã seed
+đều được chưng cất thành sketch**, chỉ T0 (graph thuần) bị DROP thẳng. Automaton rẻ (§1.1) nên hào
+phóng ở đây là đúng thiết kế.
+
+#### (c) LRU lười (lazy) trong mỗi tier — không cần danh sách liên kết
+
+```rust
+struct Evictor {
+    queues: [VecDeque<(usize /*sid*/, u64 /*seen_at*/)>; 3],  // T0..T2; T3 không có queue
+}
+```
+
+- Mỗi lần `s.last_activity` được cập nhật (`on_event()`): push `(sid, e.ts)` vào queue của tier
+  hiện tại. **Không xoá entry cũ** — chấp nhận entry lặp/ôi.
+- `EVICT_ONE()`: pop từ queue thấp nhất không rỗng; entry là *stale* (sid đã chết, đã thăng tier,
+  hoặc `seen_at != storylines[sid].last_activity`) thì bỏ qua pop tiếp. Amortized O(1), không có
+  bookkeeping trên hot path.
+
+```text
+EVICT_ONE():
+    for q in queues[T0], queues[T1], queues[T2]:
+        while let (sid, seen) = q.pop_front():
+            if dead(sid) or tier(sid) đã đổi or seen != last_activity(sid): continue  # stale
+            if tier == T0: DROP_STORYLINE(sid)          # bỏ thẳng, không sketch
+            else:          COLLAPSE_STORYLINE(sid)      # 11.1(c)
+            return true
+    return false        # chỉ còn T3 — KHÔNG evict; báo saturation (log + counter)
+```
+
+#### (d) Khi nào gọi
+
+Thêm bộ đếm `cold_stats { live_nodes, live_storylines }` cập nhật tại resolve/free. Cuối
+`on_event()`: `while cold_stats vượt trần: EVICT_ONE()` — mỗi event tối đa dọn vài phần tử, chi phí
+trải đều (tăng dần, đúng yêu cầu p99 của §10). Trần xem bảng hằng số ở 11.4.
+
+#### (e) GC theo `seg_window` (hoàn tất khoảng trống §13.1)
+
+Vòng quét lười cùng nhịp `EVICT_ONE`: automaton mà **mọi** bước kế tiếp đều đã quá `seg_window`
+tính từ `t_enabled` (điều kiện `SEG_WINDOW_OK` trong `try_commit` không bao giờ còn qua được) →
+xoá automaton khỏi storyline; storyline hết automaton rơi về T0.
+
+### 11.3 Hướng 3 — Ngân sách theo nguồn + tách hub
+
+#### (a) Root-entity
+
+```rust
+root_of: HashMap<usize /*sid gốc khi tạo*/, RootId>   // RootId = NodeKey của process "gốc ổn định"
+stable_hubs: HashSet<String>                          // từ rule file: services.exe, explorer.exe, svchost.exe...
+```
+
+Gán tại event `Exec` (chỗ duy nhất sinh quan hệ cha-con): con kế thừa `root_of[cha]`; **trừ khi**
+cha nằm trong `stable_hubs` — khi đó con **tự làm root mới** (`RootId = NodeKey` của con). Danh sách
+hub đặt trong rule file (schema §11 của `engine.md`) chứ không hardcode — đây là knob vận hành.
+
+#### (b) Ngân sách
+
+```rust
+struct SourceBudget { live_nodes: usize, created_window: VecDeque<u64> }
+budgets: HashMap<RootId, SourceBudget>
+```
+
+- `resolve()` tạo node mới → `live_nodes += 1` cho root của **actor**; `free_node()` → `-= 1`.
+- `live_nodes > MAX_LIVE_NODES_PER_ROOT` → gọi `EVICT_ONE_IN(root)`: bản `EVICT_ONE` (11.2c) nhưng
+  **lọc victim cùng root** — nguồn flood chỉ tự dọn nhà nó, không đẩy được storyline nguồn khác.
+  Trần toàn cục (11.2d) chỉ là lưới an toàn thứ hai, đi sau trần per-root.
+- `created_window` (mốc tạo node trong cửa sổ trượt): vượt `NODE_RATE_PER_ROOT` → **không từ chối
+  tạo node** (từ chối = tự tạo FN); thay vào đó phát tín hiệu `churn_anomaly(root)` cho scoring §6
+  (flooding tự tố cáo — đúng §3.1) và ưu tiên EVICT_ONE_IN(root) ngay.
+
+#### (c) Tách hub trong `unify()`/`merge()`
+
+Chặn **trước khi** merge, tại `unify()`:
+
+```text
+unify(a_uid, o_uid, op):
+    ...như hiện tại...
+    if automata(sa) + automata(so) > MAX_AUTOMATA_PER_SID
+       or |members[sa]| + |members[so]| > MAX_NODES_PER_SID:
+        link_weak(sa, so)          # ghi cạnh tham chiếu cross-sid cho forensic, KHÔNG hợp DSU
+        return sa                  # hai storyline sống riêng: sub-storyline
+    return merge(sa, so)
+```
+
+`link_weak` chỉ là một cặp `(sid, sid)` trong log/graph forensic — đủ cho SOC lần vết, nhưng
+automaton hai bên không chia sẻ tiến độ (đánh đổi §3.3: có thể cắt một correlation hợp lệ xuyên hub;
+chấp nhận để bound chi phí hub).
+
+Đồng thời siết seed tại `advance()` bước (a): storyline đã có `MAX_AUTOMATA_PER_SID` automaton →
+không seed thêm (log counter để tuning).
+
+### 11.4 Hằng số mặc định, thứ tự triển khai, test
+
+**Hằng số khởi điểm** (chỉnh qua audit-only, xem §10):
+
+| Hằng số | Mặc định đề xuất | Ghi chú |
+|---|---|---|
+| `MAX_LIVE_NODES_GLOBAL` | 1_000_000 | trần lưới-an-toàn COLD (~vài trăm MB) |
+| `MAX_LIVE_NODES_PER_ROOT` | 50_000 | Hướng 3 đi trước trần toàn cục |
+| `NODE_RATE_PER_ROOT` | 5_000 node / 60s | vượt → churn signal + evict nội bộ root |
+| `MAX_AUTOMATA_PER_SID` | 32 | trần chi phí per-event của một storyline |
+| `MAX_NODES_PER_SID` | 100_000 | ngưỡng tách hub |
+| `ρ_anchor` | 0.6 | rarity đủ để lên T2 |
+
+**Thứ tự triển khai** (mỗi bước xanh test rồi mới bước tiếp):
+
+1. **11.0** bind theo identity (refactor thuần, 4 test hiện có phải giữ xanh — không đổi hành vi).
+2. **11.1(b)** slab + free-list + `members` reverse-index (chưa evict gì — vẫn không đổi hành vi).
+3. **11.2** tier + Evictor + trần toàn cục + GC seg_window → chạy được nhưng còn evict "mù nguồn".
+4. **11.1(c,d)** COLLAPSE/REHYDRATE + pool HOT → eviction hết mất tiến độ.
+5. **11.3** budgets per-root + hub-split → đóng nốt evict-as-evasion.
+
+(Đúng trình tự đã phân tích: 1 → 2 → 3, vì evict-as-evasion chỉ tồn tại khi đã có eviction.)
+
+**Test hành vi mới** (`engine/tests/`, hiện thực hoá §10):
+
+- `flood_cross_source`: nguồn A chạy chuỗi ransomware demo; nguồn B spam 50k write vô hại xen kẽ →
+  A vẫn `DENY` tại chokepoint; RAM (đo `cold_stats`) phẳng.
+- `low_and_slow_collapse`: chuỗi dropper giãn thời gian ép storyline bị collapse giữa chừng →
+  event chạm `bound_ids` rehydrate đúng, chuỗi vẫn hoàn tất.
+- `hub_split`: 200 con của một hub trong `stable_hubs` → không sid nào vượt `MAX_NODES_PER_SID`,
+  từng nhánh vẫn khớp mẫu độc lập.
+- `sticky_never_evicted`: ép trần thật thấp, storyline `armed` không bao giờ bị evict, `EVICT_ONE`
+  trả saturation thay vì đụng T3.
