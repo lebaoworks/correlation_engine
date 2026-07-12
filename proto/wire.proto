@@ -1,0 +1,94 @@
+// Contract trao đổi thông tin endpoint-service → backend-service (kênh "ship", engine.md §2/§4/§8).
+//
+// Đây là NGUỒN SỰ THẬT của giao thức. Crate Rust `edr-proto` (src/lib.rs) hiện thực
+// đúng wire-format Protocol Buffers của schema này bằng tay (không sinh code, không
+// dependency) — mọi bytes đi trên socket đều decode được bằng:
+//
+//   protoc --decode=edr.wire.v1.Wire proto/wire.proto < payload.bin
+//
+// FRAMING TRÊN TCP: message protobuf không tự phân định ranh giới trên stream, nên
+// mỗi message `Wire` được đóng khung:   Len:u32 little-endian (chỉ payload) ++ payload.
+// Phần prefix 4 byte này nằm NGOÀI schema protobuf.
+
+syntax = "proto3";
+
+package edr.wire.v1;
+
+// Định danh tự nhiên của một node trong provenance graph. Process dùng
+// (pid, start_ts) chống pid-reuse; file dùng FileId token, không phải path.
+message NodeKey {
+  oneof key {
+    ProcessKey process = 1;
+    FileKey    file    = 2;
+    SocketKey  socket  = 3;
+    OtherKey   other   = 4;
+  }
+}
+
+message ProcessKey {
+  uint32 pid      = 1;
+  uint64 start_ts = 2;
+}
+
+message FileKey {
+  string file_id = 1; // FileId token (dev,inode / FILE_ID), KHÔNG phải path
+}
+
+message SocketKey {
+  string key = 1;
+}
+
+message OtherKey {
+  string kind = 1;
+  string key  = 2;
+}
+
+enum Op {
+  OP_UNSPECIFIED = 0; // không hợp lệ trên wire — decoder từ chối
+  OP_EXEC        = 1; // actor=parent, object=child; attrs["image"] = image FileId
+  OP_OPEN        = 2;
+  OP_READ        = 3;
+  OP_WRITE       = 4;
+  OP_CONNECT     = 5;
+  OP_INJECT      = 6;
+  OP_CREATE      = 7;
+  OP_DELETE      = 8;
+  OP_LOAD        = 9;
+  OP_DUP         = 10;
+}
+
+// Một telemetry event đã chuẩn hoá (engine.md §0).
+message Event {
+  uint64  ts     = 1;
+  Op      op     = 2;
+  NodeKey actor  = 3; // luôn là process
+  NodeKey object = 4; // file / child process / socket ...
+  map<string, string> attrs = 5;
+}
+
+// Bản ghi telemetry thường: endpoint ship MỌI event (ship-and-forget) kèm các TTP
+// nó đã xác nhận, để backend gắn nhãn chuỗi mà không phải chạy lại tagger.
+message WireEvent {
+  uint64          seq          = 1;
+  uint64          endpoint_sid = 2; // storyline id cục bộ của endpoint (gợi ý; backend tự dựng lại)
+  repeated string ttps         = 3;
+  Event           event        = 4;
+}
+
+// Bản ghi control-plane: endpoint đã DENY `event` — alert đề nghị backend rà soát
+// graph, dựng lại toàn bộ storyline dẫn tới đây và hiển thị (forensic view).
+message BlockReport {
+  uint64 seq     = 1;
+  string pattern = 2;
+  double score   = 3;
+  string reason  = 4;
+  Event  event   = 5;
+}
+
+// Một bản ghi trên kênh ship.
+message Wire {
+  oneof msg {
+    WireEvent   event = 1;
+    BlockReport block = 2;
+  }
+}

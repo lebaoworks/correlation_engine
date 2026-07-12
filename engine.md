@@ -1,752 +1,520 @@
-# Lõi phát hiện (Detection Core) — Thuật toán chi tiết
+# Lõi phát hiện phân tách endpoint–backend — Thuật toán
 
-> Phần này đặc tả **thuật toán** của lõi phát hiện trong daemon userland: nhận luồng event
-> đã gắn `candidate_ttp` từ kernel, dựng **causality graph (storyline)**, chạy **automata
-> matching tăng dần O(1)**, chấm điểm **kill-chain**, và ra **verdict inline** để kernel chặn.
+> Kiến trúc hai phía cho một EDR phòng-ngừa (prevention) chạy inline:
+> **endpoint** giữ *trạng thái phát hiện* và chặn tại chỗ — **nhanh (O(1)/event), nhẹ (bộ nhớ
+> bounded), chính xác (precision cao)**; **backend** nhận toàn bộ event stream, giữ *đồ thị
+> forensic* đầy đủ, tương quan không giới hạn và vũ trang ngược xuống endpoint để thực thi.
 >
-> Ràng buộc xuyên suốt: **mỗi event xử lý trong thời gian bounded** (không thao tác NP-hard trên
-> đường nóng). Mọi cấu trúc tra cứu là hash/index O(1) amortized.
+> Ý tưởng cốt lõi: thứ khiến trạng thái phình vô hạn (đồ thị provenance) chỉ phục vụ **điều tra**;
+> việc phát hiện inline không cần nó. Nên endpoint **ship-and-forget** mọi event lên backend và
+> **không dựng đồ thị cục bộ** — nó chỉ duy trì một *working set* bị chặn bởi một **bất biến bộ
+> nhớ** đơn giản (§3), không phải một chính sách dọn dẹp.
 
 ---
 
-## 0. Ký hiệu & cấu trúc dữ liệu
+## 0. Bài toán & nước đi
+
+Trên một host thật, luồng event tích luỹ vô hạn theo thời gian. Phân rã trạng thái cần giữ theo
+cấu trúc:
+
+| Thành phần | Kích thước | Tăng theo | Ai thật sự cần? |
+|---|---|---|---|
+| Cạnh (edges) của đồ thị nhân-quả | ~50B/cạnh | **hoạt động — vô hạn** | chỉ forensic/điều tra |
+| Node + index | ~100–200B/node | số thực thể distinct theo thời gian | phát hiện cần *identity + tuyến*; phần còn lại là forensic |
+| `Automaton` (tiến độ khớp mẫu) | ~200B–1KB | số chuỗi đang khớp (nhỏ) | **phát hiện — không được mất** |
+
+Hai quan sát quyết định:
+
+1. **Thứ phình vô hạn (cạnh, và phần lớn thuộc tính node) chỉ phục vụ điều tra.** Phát hiện inline
+   không đọc cạnh lịch sử — nó đọc tiến độ automaton + identity đang bind + vài bộ đếm trượt.
+2. **Nếu điều tra là việc của backend, endpoint không cần lưu cạnh, không cần lịch sử.** Cái còn
+   lại (automata + tuyến hiện hành) có **cận trên tự nhiên theo thời gian sống của automaton** —
+   bound được mà không cần chính sách evict.
+
+⟹ **Nước đi:** endpoint **ship-and-forget** mọi event lên backend, **không dựng đồ thị cục bộ**;
+nó chỉ duy trì working set đủ để chạy automata cho các chuỗi *đang diễn ra trong cửa sổ thời gian
+ngắn*. Mọi tương quan vượt tầm đó là việc của backend (§8), và backend **vũ trang ngược** xuống
+endpoint để thực thi (§9).
+
+Đây không phải "cắt bớt để tiết kiệm" mà là **phân vai đúng chủ sở hữu**: cái nặng-mà-để-điều-tra
+về backend; cái rẻ-mà-để-chặn ở lại endpoint và được giữ *hào phóng, trung thực*.
+
+---
+
+## 1. Phân vai & khế ước phát hiện
 
 ```
-Event e = {
-    ts,                     # timestamp đơn điệu tăng
-    op,                     # exec|open|read|write|connect|inject|create|delete|load|dup
-    actor,                  # {pid, start_ts} — process gây ra hành động (khoá ổn định)
-    object,                 # {type, key} — file path / socket / pid đích / registry key ...
-    candidate_ttps,         # tập TTP-id kernel đã gợi ý (có thể rỗng)
-    attrs                   # entropy, remote_ip, image_hash, access_mask, ...
+ENDPOINT  = bộ chặn inline theo CỬA SỔ (bounded-window inline blocker)
+            • O(1)/event, không chờ mạng trên đường verdict
+            • bộ nhớ bounded bởi BẤT BIẾN working-set (§3), không bởi chính sách evict
+            • chặn được chuỗi mà bằng chứng đến trong khi automaton còn sống
+BACKEND   = bộ tương quan KHÔNG CỬA SỔ (unbounded correlator)
+            • đồ thị provenance đầy đủ, bền, đa-host, không trần
+            • matcher chạy lại không deadline: window dài, khâu thành phần, subgraph, baseline rarity
+            • phát hiện cái vượt tầm endpoint → VŨ TRANG ngược xuống để thực thi
+```
+
+**Khế ước (nói thẳng, không mập mờ):**
+
+- **Endpoint bảo đảm**: mọi mẫu có đủ bằng chứng xuất hiện trong khi automaton của nó còn sống
+  (trong các `seg_window`, §6) và các thực thể bị bind còn "ấm" (§3) → **phát hiện + chặn tại
+  chỗ, đồng bộ, không hồi tố**. Đây đúng là lớp cần chặn *hành động đầu tiên* (mã hoá, đọc LSASS,
+  exfil) — nơi block inline mới có nghĩa.
+- **Backend bảo đảm**: mọi thứ vượt tầm endpoint — low-and-slow kéo ngày, bàn giao qua hub, lateral
+  movement xuyên host, chuỗi cần subgraph matching — được phát hiện trên đồ thị đầy đủ, rồi **arm**
+  xuống endpoint. Cái giá: **cửa sổ trễ** một round-trip (§11) — giới hạn vật lý, không phải lỗi.
+- **Endpoint đứng một mình được**: backend là *phần cộng thêm*, không phải phụ thuộc. Mất mạng →
+  phát hiện cục bộ **không đổi** (§10); chỉ mất phần vươn xa của backend.
+
+---
+
+## 2. Cấu trúc dữ liệu endpoint (lean)
+
+Endpoint chỉ giữ trạng thái phát hiện. Không có mảng node append-only, không có index toàn cục bền,
+không có cạnh, không có lịch sử TTP dài.
+
+```
+# ---- thực thể chỉ còn IDENTITY + con trỏ tuyến (không cạnh, không attrs điều tra) ----
+Entity ent = {
+    key,            # identity ổn định (xem "Khoá identity" dưới)
+    line,           # con trỏ tới Storyline hiện hành (null nếu chưa thuộc chuỗi nào)
+    refcount,       # số automaton đang BIND thực thể này  (giữ nó "ấm" — §3)
+    last_touch      # ts chạm gần nhất (cửa sổ working-set)
 }
 
-Node n = {
-    uid,                    # định danh nội bộ
-    type, key,              # process|file|socket|... + khoá tự nhiên
-    storyline_id,
-    first_seen, last_seen
-}
-
-StorylineState S = {
-    sid,
-    nodes: set<uid>,
-    automata: map<pattern_id, AutomatonInstance>,   # các mẫu đang chạy trên storyline này
-    ttp_history: ring<{ttp, ts, node}>,             # TTP gần đây (cho window/scoring)
-    score,                                          # điểm kill-chain hiện tại
+# ---- storyline = TẬP NHỎ tường minh (KHÔNG union-find toàn cục) ----
+Storyline S = {
+    members: set<key>,                 # bounded bởi MAX_NODES_PER_SID
+    automata: map<pattern_id, Automaton>,   # bounded bởi MAX_AUTOMATA_PER_SID
+    ttp_ring: ring<{ttp, ts}>,         # NHỎ, chỉ đủ cho rarity-anchor & scoring window
     last_activity
 }
 
-AutomatonInstance A = {
+# ---- automaton: tiến độ khớp mẫu, BIND THEO IDENTITY ----
+Automaton A = {
     pattern_id,
-    completed_mask,         # bitset: bit i = bước i đã thoả (KHÔNG lưu thứ tự — xem §5.2)
-    step_ts[],              # thời điểm hoàn thành từng bit (seg_window & order_bonus)
-    bound_nodes,            # role -> node đã gắn (kiểm scope + variable binding)
-    armed                   # đã đẩy cờ chặn xuống kernel chưa
+    completed_mask,          # bitset tiến độ (§6): bit i = bước i đã thoả
+    step_ts[],               # mốc hoàn thành từng bit (cho seg_window & order_bonus)
+    bound_ids: map<role,key>,# role -> IDENTITY (KHÔNG phải con trỏ node)  — điều kiện để nhẹ
+    score,
+    armed
 }
 ```
 
-Ba chỉ mục toàn cục (đều O(1) tra cứu):
+Ba bảng sống trên endpoint, **tất cả tự-bound** (§3):
+
 ```
-NODE_INDEX     : (type, key)      -> uid            # tìm/ tạo node
-ACTOR_INDEX    : (pid, start_ts)  -> uid            # node của process theo khoá ổn định
-SID_INDEX      : uid              -> sid            # node thuộc storyline nào
-PATTERN_TRIGGER: ttp_id           -> set<pattern_id> # TTP nào khởi động/đẩy mẫu nào
+ACTIVE   : key -> Entity            # working set; chỉ chứa thực thể còn ấm hoặc đang bị bind
+BIND_IDX : key -> set<(S,role)>     # nghịch đảo: identity nào đang bị automaton nào bind
+PRED     : actor_key -> RateState   # bộ đếm trượt cho tagger (rate/dir-spread), windowed
 ```
+
+Cộng với **bảng kernel-arm** (trong driver, không đếm vào RAM userland) và **hàng đợi ship**
+(bounded, spill đĩa — §10). `PATTERN_TRIGGER: ttp -> set<pattern_id>` là bảng tĩnh từ rule (không
+tăng), dùng để khởi động mẫu (§6).
+
+**Khoá identity** — mọi so sánh thực thể đi qua *định danh ổn định*, không qua chuỗi path:
+
+- **Process**: `(pid, start_ts)` — `start_ts` chống **pid reuse** (pid được cấp lại cho tiến
+  trình khác).
+- **File**: `(volume_serial, FileId)` [Windows] hoặc `(dev, inode)` [Linux] — **không phải path**.
+  Path đổi được bằng rename và có nhiều biến thể (hoa/thường, 8.3, `\\?\`, hardlink); FileId sống
+  sót qua rename và phân biệt được bản copy.
+- **Socket**: `(proto, ip, port)`.
+
+> Vì `bound_ids` giữ **identity** chứ không phải con trỏ vào graph, drop một `Entity` khỏi `ACTIVE`
+> **không bao giờ làm gãy binding** — đây là tiền đề để bất biến §3 đúng, và để "ghi X rồi chạy
+> đúng X" nhận diện được kể cả sau `rename X→Y` (§7).
 
 ---
 
-## 1. Vòng lặp chính (per-event pipeline)
+## 3. Bất biến working-set (trái tim của endpoint)
 
+Thay vì một *chính sách eviction* (ai bị bỏ, khi nào, theo tiêu chí nào — mỗi lựa chọn là một edge
+case), endpoint giữ một **bất biến duy nhất**:
+
+> **Giữ `Entity e` trong `ACTIVE` ⟺ `e.refcount > 0` (đang bị ≥1 automaton bind) HOẶC
+> `e.last_touch ≥ now − W` (chạm trong cửa sổ W).**
+> Bỏ `e` ngay khi cả hai sai. Bản forensic của `e` **đã được ship** nên bỏ là *không mất mát*.
+
+Ba hệ quả khoá chặt bộ nhớ, không cần thêm luật nào:
+
+**(a) Tiến độ automaton không bao giờ mất vì áp lực bộ nhớ.** Thực thể mà một automaton đang bind
+có `refcount > 0` → *bất khả bỏ*. Automaton chỉ chết theo `seg_window` của chính nó (§6), không
+theo độ nguội hay theo trần. ⟹ **không có "LRU giết chuỗi lén lút"**, không cần khái niệm "sticky".
+
+**(b) Thực thể nguội-và-không-bị-bind bỏ đi là an toàn.** Nếu không automaton nào bind `e`, thì
+không tiến độ phát hiện nào phụ thuộc `e`; mất liên kết `e → storyline` chỉ mất khả năng *merge
+nhân-quả trong tương lai* của một chuỗi **chưa** khởi động — mà chuỗi đó, nếu khởi động, sẽ tự
+bind `e` (xem (c)). Và backend vẫn giữ trọn.
+
+**(c) Cái gì đáng theo dõi thì tự ghim mình.** Mọi mẫu seed **tại** bước gốc của nó và **bind ngay**
+thực thể quan trọng. Ví dụ dropper: event `write X` vừa seed automaton vừa `bind dropped:=X` → từ
+giây đó `X.refcount>0`, `X` ở lại bất kể nguội, tới khi `exec X` khớp hoặc automaton hết
+`seg_window`. Bind theo FileId nên `rename X→Y` cũng vô hại (§2).
+
+**Cận bộ nhớ (chứng minh phác):**
 ```
-function ON_EVENT(e):
-    # (1) chuẩn hoá & phân giải node
-    a_uid = RESOLVE_NODE(e.actor, PROCESS)
-    o_uid = RESOLVE_NODE(e.object)
-
-    # (2) hợp nhất storyline theo quan hệ nhân-quả
-    sid = UNIFY_STORYLINE(a_uid, o_uid, e.op)
-
-    # (3) gắn cạnh vào causality graph
-    ADD_EDGE(sid, a_uid, o_uid, e.op, e.ts)
-
-    # (4) gán TTP đầy đủ (kernel mới chỉ gợi ý)
-    ttps = TAG_TTP(e, a_uid, o_uid, sid)
-
-    # (5) đẩy automata + chấm điểm; thu verdict
-    verdict = ADVANCE(sid, ttps, e)
-
-    # (6) trả quyết định inline cho kernel
-    return DECIDE(verdict, e)
+|ACTIVE| ≤  Σ (arity bind của các automaton sống)           # thành phần "bị ghim"
+          + |{thực thể chạm trong W}|                        # thành phần "còn ấm"
+        ≤  MAX_AUTOMATA_GLOBAL × MAX_BIND_ARITY  +  event_rate × W
 ```
+Cả hai số hạng là **hằng số theo cấu hình**, không phụ thuộc tổng số thực thể từng thấy hay tổng
+hoạt động tích luỹ. `BIND_IDX`, `PRED` cũng bị kẹp bởi cùng hai đại lượng. ⟹ **RAM phẳng.**
 
-Mọi bước (1)–(6) là O(1) amortized theo số automata đang sống trên storyline liên quan (chặn trên
-bằng hằng số `MAX_AUTOMATA_PER_SID`, xem §7).
+Dọn dẹp là **lười, amortized**: mỗi event kiểm `last_touch` của vài thực thể chạm gần (hoặc một
+sweep vòng nhẹ), bỏ cái hết hạn & `refcount==0`. Không danh sách LRU liên kết, không cấu trúc ưu
+tiên, không stop-the-world. Tăng dần → không spike p99.
+
+> Điểm cốt lõi: **cái bị bỏ không bao giờ là trạng thái phát hiện** — chỉ là node graph mà backend
+> mới là chủ sở hữu thật. Chuỗi vượt cửa sổ W **không** được cứu bởi endpoint; nó là *việc của
+> backend* theo khế ước §1. Ta đổi "cố cứu mọi thứ tại chỗ (đẻ edge case)" lấy "một ranh giới trách
+> nhiệm sắc nét".
 
 ---
 
-## 2. RESOLVE_NODE — phân giải/khởi tạo node
+## 4. Vòng lặp chính endpoint (per-event)
 
 ```
-function RESOLVE_NODE(ref, type_hint):
-    key = NORMALIZE(ref)                  # path chuẩn hoá, (pid,start_ts), (ip,port)...
-    uid = NODE_INDEX.get((type, key))
-    if uid == null:
-        uid = NEW_NODE(type, key)
-        NODE_INDEX[(type, key)] = uid
-    NODE(uid).last_seen = now
-    return uid
+function ON_EVENT(e):                                   # tất cả bước O(1) amortized
+    a = TOUCH(e.actor)                                  # get-or-create Entity, cập nhật last_touch
+    o = TOUCH(e.object)
+
+    S = LINK(a, o, e.op)                                # merge nhân-quả trong working set (§5)
+
+    SHIP(e, meta={host, sid=id(S), seq++})              # (!) đẩy async lên backend — KHÔNG lưu cạnh
+
+    ttps = TAG_TTP(e, a, o, S)                          # gán technique (§6.0), dùng PRED cho rate/spread
+
+    verdict = ADVANCE(S, ttps, e)                       # seed + push automata + score (§6)
+
+    SWEEP_A_LITTLE(now)                                 # GC automaton hết seg_window + bỏ entity nguội
+
+    return DECIDE(verdict, e)                           # DENY/ALLOW inline (§8-endpoint)
 ```
 
-`start_ts` trong khoá process chống **pid reuse** (pid được cấp lại cho tiến trình khác).
+**Cạnh không tồn tại trong bất kỳ cấu trúc cục bộ nào.** Một cạnh chỉ sống đúng một khoảnh khắc:
+1. cập nhật `LINK` (merge nhân-quả, nếu là op causal),
+2. cập nhật `PRED` (bộ đếm tagger),
+3. đi vào hàng đợi ship,
+rồi biến mất khỏi endpoint. Đồ thị mà SOC xem được dựng **hoàn toàn ở backend** (§8).
 
-Với **file**, khoá tự nhiên là **identity của file, KHÔNG phải chuỗi path**:
-- **Windows**: `(volume_serial, FILE_ID)` — lấy trong minifilter qua `FltGetFileNameInformation`
-  / `FILE_ID_INFORMATION`. Path trên Windows nhiều biến thể cho cùng một file (hoa/thường,
-  short name 8.3 `PROGRA~1`, prefix `\\?\`, hardlink, junction) và **đổi được bằng rename**;
-  FileId sống sót qua rename.
-- **Linux**: `(dev, inode)`.
+`SHIP` là push lock-free vào ring; nén/gửi ở thread riêng, **ngoài hot path** — cam kết O(1) giữ
+nguyên. `seq` đơn điệu per-host để backend phát hiện lỗ stream (mất event = tín hiệu, không im
+lặng).
 
-Path chuẩn hoá vẫn lưu trong `attrs` để hiển thị/điều tra, nhưng mọi so sánh node (kể cả
-variable binding §5.8) đi qua khoá identity này.
+`DECIDE`: `BLOCK → DENY` (kernel trả `-EPERM`/chặn I/O); mọi verdict khác → `ALLOW`. **Fail-open**:
+nếu daemon quá tải/không phản hồi trong ngân sách latency, kernel **allow** (ưu tiên ổn định) —
+trạng thái đã đẩy sẵn xuống kernel (arm, §9) vẫn giữ được điểm nghẽn dù userland chậm.
 
 ---
 
-## 3. UNIFY_STORYLINE — hợp nhất chuỗi nhân-quả
+## 5. LINK — merge nhân-quả trên tập nhỏ tường minh
 
-Mục tiêu: gán cùng `storyline_id` cho các thực thể có quan hệ nhân-quả. Dùng **Union-Find
-(DSU)** với path compression → gần O(1).
+Một storyline là **tập nhỏ có trần**, không phải một thành phần của union-find toàn cục. Nhờ đó
+xoá member là O(1) và merge là union-by-size bounded — không cần tombstone/rebuild.
 
 ```
-function UNIFY_STORYLINE(a_uid, o_uid, op):
-    sa = SID_INDEX.get(a_uid) ?? NEW_STORYLINE(a_uid)
+function LINK(a, o, op):
+    Sa = a.line ?? NEW_STORYLINE(a)
+    if not IS_CAUSAL(op):                 # read/open/connect: chỉ chạm — không merge
+        return Sa                         # (cạnh đã được SHIP cho forensic)
 
-    if IS_CAUSAL(op):                     # exec, inject, write, create, dup...
-        so = SID_INDEX.get(o_uid)
-        if so == null:
-            JOIN(o_uid, sa)               # object kế thừa storyline của actor
-        elif so != sa:
-            sa = MERGE_STORYLINE(sa, so)  # DSU union + gộp automata/ttp_history
-    return sa
+    So = o.line
+    if So == null:
+        JOIN(o, Sa)                       # object kế thừa storyline actor
+        return Sa
+    if So == Sa: return Sa
+
+    # merge — NHƯNG có trần: hub không được nuốt cả máy
+    if |Sa.members| + |So.members| > MAX_NODES_PER_SID
+       or |Sa.automata| + |So.automata| > MAX_AUTOMATA_PER_SID:
+        return Sa                         # KHÔNG merge tại endpoint; backend sẽ khâu (§8).
+                                          # cạnh causal đã SHIP → backend có đủ để nối.
+    return MERGE_BY_SIZE(Sa, So)          # dời members/automata tập nhỏ vào tập lớn: O(nhỏ), có trần
 ```
 
-Quy tắc `IS_CAUSAL` (cạnh nào lan truyền storyline):
-- `exec` (parent→child), `inject`, `create process/thread`, `dup/inherit handle` → **có**.
-- `write file` → **có** (file trở thành sản phẩm của storyline; nếu sau này bị `exec` thì nối tiếp).
-- `read`, `connect`, `open` thuần → **không** tự merge (tránh dependency explosion), chỉ ghi cạnh.
+- **`IS_CAUSAL`**: `exec/inject/create/dup/write` → **merge** (quan hệ *sản sinh/điều khiển*: object
+  trở thành sản phẩm của storyline actor). `read/open/connect` → **chỉ ship cạnh**, không merge.
+  Đây là van chống bùng nổ phụ thuộc *ngữ nghĩa*: chỉ quan hệ sản sinh mới hợp nhất chuỗi; quan hệ
+  *đụng chạm* chỉ để lại cạnh phục vụ scoring/điều tra.
+- **Trần merge** là van chống bùng nổ *kích thước* (hub `services.exe`/`explorer.exe` là cha của
+  gần như cả máy). Khi chạm trần, endpoint **không merge** — hai storyline sống riêng; tương quan
+  xuyên điểm đó do backend làm trên đồ thị đầy đủ. Chỉ **một trần và một fallback** — không thêm cơ
+  chế đặc biệt nào để xử lý hub.
+- **Xoá gọn**: bỏ một member nguội = `S.members.remove(key)` + `ACTIVE.remove(key)`. Storyline hết
+  `members` **và** hết `automata` → tự tiêu.
 
-> Đây là chỗ chống **bùng nổ phụ thuộc**: chỉ quan hệ *sản sinh/điều khiển* mới hợp nhất storyline;
-> quan hệ *đụng chạm* chỉ để lại cạnh phục vụ scoring/điều tra.
-
-`MERGE_STORYLINE` phải gộp `automata` và `ttp_history` của hai storyline; để tránh chi phí lớn,
-giữ storyline nhỏ merge vào lớn (union by size).
+> Storyline chỉ cần tương quan trong working set nhỏ (tương quan toàn lịch sử là việc backend), nên
+> một tập tường minh có trần là đủ — và xoá được, khác với union-find toàn cục.
 
 ---
 
-## 4. TAG_TTP — gán technique đầy đủ
+## 6. ADVANCE — partial-order matching + vòng đời
 
-Kernel chỉ gợi ý `candidate_ttps` (lọc rẻ). Userland xác nhận bằng predicate đầy đủ (có ngữ cảnh
-graph mà kernel không có).
+### 6.0 TAG_TTP — gán technique
+
+Mỗi event được gán tập TTP bằng các **tagger** thuần, bounded (predicate closed-set trên `op`,
+`image`, `entropy`, rate/spread…). Rate/spread là **stateful nhẹ**: mọi `write` cộng vào bộ đếm
+trượt của actor (`PRED`), cập nhật O(1). Tagger là lớp platform-specific; đầu ra là tập `ttps`.
+
+### 6.1 Mẫu = precedence DAG
+
+Mỗi mẫu tấn công là một **thứ tự bộ phận (partial order) = DAG**, tiến độ theo **bitmask các bước
+đã hoàn thành**. Không FSM tuyến tính (giả định thứ tự cứng), không subgraph matching (NP-hard).
 
 ```
-function TAG_TTP(e, a_uid, o_uid, sid):
-    result = {}
-    for t in e.candidate_ttps ∪ CHEAP_LOOKUP(e.op):
-        if TTP_TABLE[t].predicate(e, a_uid, o_uid, GRAPH(sid)):
-            result.add(t)
-            S(sid).ttp_history.push({t, e.ts, o_uid})
-    return result
+Pattern = { id, steps[], required_mask, scope, block_at, theta_alert, theta_block, root_gate }
+Step    = { bit, match, prereq_mask, seg_window, enforceable, optional, bindings }
+```
+- `match`: khớp theo `ttp:ID`, **OR-slot** `ttp_any:A|B|C` (biến thể công cụ), hoặc raw `op:OP`.
+- `prereq_mask`: các bit phải xong **trước** — mã hoá toàn bộ thứ tự bộ phận. "x phải đầu", "nhóm
+  tự do thứ tự", "mốc giữa hai nhóm" đều rơi ra từ đây, **không cần liệt kê hoán vị**.
+- `bindings`: role → nguồn identity (`object|image|actor`), ràng buộc biến (§6.2).
+- `scope` ∈ `same_storyline | same_actor | free`; `block_at` = bit điểm nghẽn chặn được.
+
+### 6.2 Tiến trạng thái
+
+```
+function ADVANCE(S, ttps, e):
+    # (a) seed: mẫu có bước gốc (prereq_mask==0) khớp e và qua root_gate, chưa có trên S
+    for pid in PATTERN_TRIGGER[t] for t in ttps:
+        if matches_root(pid, e, ttps) and root_gate(pid).ok(e) and pid not in S.automata:
+            S.automata[pid] = NEW_AUTOMATON(pid)         # (trần MAX_AUTOMATA_PER_SID là lưới an toàn)
+
+    # (b) push mọi automaton đang sống trên S
+    for A in S.automata:
+        for step where step.match khớp (e, ttps):
+            if TRY_COMMIT(A, step, e): rescore_and_emit(A, S, e, step)
+    return best_verdict
 ```
 
-`predicate` là hàm thuần, bounded. Ví dụ:
+`TRY_COMMIT` gồm 4 vị từ, **đều O(1)** — thiếu bất kỳ cái nào thì bỏ qua an toàn (không set bit,
+không vỡ chuỗi):
+
 ```
-T1486 (data encrypted for impact):
-    e.op == write
-    AND e.attrs.entropy_delta > θ_entropy
-    AND rate(write, actor, 1s) > θ_rate
-    AND distinct_dirs(actor, window) > θ_spread
-
-T1003.001 (LSASS memory read):
-    e.op == read
-    AND e.object.type == process
-    AND NODE(o_uid).key.image == "lsass.exe"
-    AND (e.attrs.access_mask & PROCESS_VM_READ)
-
-T1490 (inhibit recovery):
-    e.op == exec
-    AND matches(cmdline, /vssadmin.*delete.*shadows|wbadmin.*delete/)
+PREREQ_OK      : (step.prereq_mask & A.completed_mask) == step.prereq_mask   # đủ tiền đề
+SEG_WINDOW_OK  : e.ts − max(A.step_ts[b] for b in prereq) ≤ step.seg_window  # deadline theo đoạn
+SCOPE_OK       : same_storyline → true ; same_actor → e.actor ∈ A.bound_ids ; free → true
+BINDING_OK     : ∀ binding: identity_of(e, src) khớp A.bound_ids[role] nếu đã có; xung đột → false
 ```
 
-Một predicate có thể **stateful nhẹ** (rate, spread) nhưng phải cập nhật O(1) bằng bộ đếm trượt.
-
----
-
-## 5. ADVANCE — partial-order matching tăng dần (LÕI)
-
-Đây là trái tim. Thay vì FSM tuyến tính (một `cur_stage` chạy thẳng — giả định thứ tự cứng, và
-nếu cố mã hoá "mọi thứ tự" thì **nổ n! đường đi**), ta biểu diễn mỗi mẫu tấn công là một
-**thứ tự bộ phận (partial order) = DAG**, và theo dõi tiến độ bằng **bitmask các bước đã hoàn
-thành**. Nhờ đó xử lý được thứ tự tự do, xen kẽ, nhóm-trước / nhóm-giữa / nhóm-sau — mà vẫn
-**O(1)/event** (thao tác bitwise trên machine word). Không subgraph matching (NP-hard, POIROT).
-
-### 5.1 Định nghĩa mẫu (pattern) — precedence DAG
+`COMMIT_STEP` (khi cả 4 đúng):
 ```
-Pattern = {
-    id,
-    steps: [ Step ],             # mỗi step gắn 1 bit
-    required_mask,               # các bit bắt buộc để chấp nhận
-    scope,                       # same_storyline | same_actor | free
-    block_at,                    # step-id là điểm chặn (enforceable)
-}
-Step = {
-    bit,                         # vị trí bit trong mask
-    ttps,                        # OR-slot: bất kỳ TTP nào trong tập này thoả step
-    prereq_mask,                 # các bit phải xong TRƯỚC (mã hoá thứ tự bộ phận)
-    enforceable,                 # là hành động nghẽn chặn được?
-    optional,                   # không nằm trong required_mask
-    seg_window                   # deadline cục bộ tính từ khi prereq đủ (§5.6)
-}
+A.completed_mask |= (1 << step.bit);  A.step_ts[step.bit] = e.ts
+for binding in step.bindings:
+    key = identity_of(e, binding.src)                    # object | image | actor
+    if binding.role NEW to A:
+        A.bound_ids[binding.role] = key
+        ent(key).refcount += 1;  BIND_IDX[key].add((S, role))   # GHIM entity (§3a)
 ```
 
-Ba mệnh đề thứ tự đều rơi ra từ `prereq_mask`, **không cần liệt kê hoán vị**:
-- **"x phải đầu"** ⟸ mọi step khác có `x` trong `prereq_mask`.
-- **"nhóm {b,c,d} tự do thứ tự"** ⟸ chúng không có nhau trong `prereq_mask` của nhau.
-- **"mốc M giữa hai nhóm"** ⟸ `prereq_mask[M] = toàn bộ bit nhóm trước`; mỗi phần tử nhóm sau có `prereq_mask = {M}`.
+Chi phí mỗi event: một phép AND + một phép OR trên machine word — thứ tự tự do/xen kẽ đều **miễn
+phí**. Thứ *đắt* duy nhất là binding + thứ tự tự do đồng thời; giữ bounded bằng `scope=
+same_storyline`, neo TTP hiếm trước, và trần `MAX_BIND_ARITY` per-pattern.
 
-Ghép nhiều mốc ⇒ chuỗi tuỳ ý dài: `G0 → A → G1 → E → G2 → …` (xem ví dụ §5.7).
+**Deadline theo từng đoạn (`seg_window`), không window toàn cục.** Mỗi bước có deadline riêng tính
+từ khi `prereq` vừa đủ. Nhờ vậy chuỗi dài có thể cách nhau lâu miễn **mỗi đoạn** diễn ra đủ nhanh;
+đoạn đến quá muộn thì bỏ qua (không set bit) chứ không vỡ toàn chuỗi.
 
-### 5.2 Trạng thái automaton
+> **Không có cổng lọc (admission) nào chen giữa seed.** Cứ bước gốc khớp là seed. Được phép "rộng
+> tay" vì automaton chỉ ~1KB và **không kéo theo graph**; số lượng automaton do GC theo `seg_window`
+> + trần lo (§6.4). Nhờ đó chuỗi toàn-bước-phổ-biến (living-off-the-land) vẫn có automaton từ event
+> đầu tiên.
+
+### 6.3 Verdict, arm & chấm điểm
+
 ```
-AutomatonInstance A = {
-    pattern_id,
-    completed_mask   = 0,        # bit i = step i đã thoả (KHÔNG lưu thứ tự)
-    step_ts[]        = {},       # thời điểm hoàn thành từng bit (cho seg_window & order_bonus)
-    bound_nodes      = {},       # node đã gắn từng step (kiểm scope + variable binding, §5.8)
-    armed            = false
-}
-```
+function rescore_and_emit(A, S, e, step):
+    A.score = KILL_CHAIN_SCORE(A)
+    accepting = (A.completed_mask & required_mask) == required_mask
+    at_block  = (step.bit == block_at) and step.enforceable
 
-### 5.3 Thuật toán tiến trạng thái
-```
-function ADVANCE(sid, ttps, e):
-    S = STORYLINE(sid)
-    fired = NONE
+    if accepting:
+        if A.score ≥ θ_block and at_block:  return BLOCK      # chặn đúng bước nghẽn, không hồi tố
+        if A.score ≥ θ_alert:               return ALERT
+        return SUSPECT
 
-    for t in ttps:
-        # (a) khởi động mẫu: t khớp một step CÓ prereq_mask == 0
-        for pid in PATTERN_TRIGGER[t]:
-            if not S.automata.has(pid) and matches_root_step(pid, t):
-                S.automata[pid] = NEW_AUTOMATON(pid)
-
-        # (b) đẩy các automaton đang sống trên storyline
-        for A in S.automata.values():
-            for step in steps_matching(A, t):          # step nào có t trong step.ttps (OR-slot)
-                bit = step.bit
-                if bitset(A.completed_mask, bit):       continue   # đã thoả rồi
-                if not PREREQ_OK(A, step):              continue   # thiếu tiền đề → bỏ qua an toàn
-                if not SEG_WINDOW_OK(A, step, e):       continue   # quá deadline đoạn (§5.6)
-                if not SCOPE_OK(A, e, sid):             continue   # sai scope nhân-quả
-                if not BINDING_OK(A, step, e):          continue   # ràng buộc node (§5.8)
-
-                COMMIT_STEP(A, step, e)                 # set bit, ghi step_ts, cập nhật bound_nodes
-                S.score = KILL_CHAIN_SCORE(A, S)        # §6
-                fired = max(fired, MAYBE_EMIT(A, S, e, step))
-
-    GC_EXPIRED(S, e.ts)
-    return fired
-```
-
-### 5.4 Các vị từ phụ (đều O(1))
-```
-PREREQ_OK(A, step):          # đủ tiền đề chưa? — mã hoá thứ tự bộ phận
-    return (step.prereq_mask & A.completed_mask) == step.prereq_mask
-
-IS_ACCEPTING(A):             # đủ tập bit bắt buộc, không quan tâm thứ tự đến
-    return (A.completed_mask & pattern(A).required_mask) == pattern(A).required_mask
-
-SCOPE_OK(A, e, sid):
-    switch pattern(A).scope:
-        same_storyline: return sid == A.sid
-        same_actor:     return e.actor.uid in A.bound_nodes.values()
-        free:           return true
-```
-
-`COMMIT_STEP` chỉ là `A.completed_mask |= (1 << step.bit)` + ghi `step_ts[bit]=e.ts` — hằng số.
-
-### 5.5 MAYBE_EMIT — sinh verdict + "armed"
-```
-function MAYBE_EMIT(A, S, e, step):
-    conf = S.score
-    at_block = (step.id == pattern(A).block_at) and step.enforceable
-
-    if IS_ACCEPTING(A):
-        if conf >= θ_block and at_block:
-            return BLOCK(reason=pattern(A).id, node=e.object)   # chặn đúng hành động nghẽn
-        if conf >= θ_alert:
-            return ALERT(pattern(A).id, storyline=S)
-        return SUSPECT(pattern(A).id)
-
-    # chưa đủ tập, nhưng đã đủ điểm + còn 1 hành động enforceable đang chờ → vũ trang kernel
-    if conf >= θ_block and not A.armed and has_pending_enforceable(A):
+    # chưa đủ tập, nhưng đủ điểm + còn một bước enforceable đang chờ → vũ trang kernel
+    if A.score ≥ θ_block and not A.armed and has_pending_enforceable(A):
         A.armed = true
-        PUSH_KERNEL_ARM(S.sid, action=pattern(A).block_at.op, scope=A.bound_nodes)
-        # kernel tự deny khi event enforcing khớp tới, không cần round-trip userland
-    return NONE
+        KERNEL_ARM[identity_scope(A, e)] = pending_enforceable_op(A)   # arm THEO IDENTITY (§9)
+    return (ALERT if A.score ≥ θ_alert else NONE)
 ```
 
-> Điểm mấu chốt giữ nguyên: **chỉ BLOCK khi event hiện tại đúng là bước `block_at` enforceable**
-> — chặn hành động nghẽn (mã hoá / đọc LSASS / exfil), không hồi tố. Nếu chuỗi đủ điểm nhưng
-> event enforcing chưa tới, ta ở trạng thái **armed** chờ chặn nó ngay trong kernel.
-
-### 5.6 Window theo từng đoạn (không dùng window toàn cục)
-
-Một window toàn cục cho chuỗi dài `G0→A→G1→E→G2` là quá chặt. Thay bằng **deadline cục bộ theo
-mốc**: mỗi step có `seg_window` tính từ thời điểm `prereq_mask` của nó vừa đủ.
+**Chấm điểm kill-chain:**
 ```
-SEG_WINDOW_OK(A, step, e):
-    t_enabled = max( A.step_ts[b] for b in bits(step.prereq_mask) )   # mốc mở khoá đoạn này
-    return (e.ts - t_enabled) <= step.seg_window
+KILL_CHAIN_SCORE(A) = w1·(#tactic phủ) + w2·Σseverity + w3·order_bonus + w4·Σrarity
 ```
-Nhờ vậy đoạn đầu có thể cách đoạn cuối rất lâu mà chuỗi vẫn hợp lệ, miễn **mỗi đoạn** diễn ra đủ
-nhanh. `GC_EXPIRED` huỷ automaton khi đoạn đang chờ vượt `seg_window` mà không tiến.
+- Thứ tự chỉ là **thưởng** (`order_bonus` = tỉ lệ cặp bước đến đúng chiều thời gian), **không** phải
+  điều kiện chấp nhận — partial-order vẫn accept dù sai thứ tự, chỉ mất phần thưởng này.
+- `rarity` = nghịch đảo tần suất baseline → TTP hiếm kéo điểm lên nhanh, neo vào hành vi bất thường.
+- Trọng số hiệu chỉnh để **một mình severity không đủ chặn**: phải phủ nhiều giai đoạn kill-chain
+  mới vượt `θ_block`. Hành vi lẻ (đơn TTP) chỉ cảnh báo; chuỗi phủ nhiều tactic mới bị chặn.
 
-### 5.7 Ví dụ: `{P,Q} → A → {B,C,D} → E → {F,G,H}`
+**Điểm mấu chốt:** chỉ `BLOCK` khi event hiện tại đúng là bước `block_at` enforceable (mã hoá / đọc
+LSASS / exfil). Nếu chuỗi đủ điểm nhưng event enforcing chưa tới, ta ở trạng thái **armed** — đẩy
+cờ chặn xuống kernel để chặn nó **ngay trong kernel** lần tới, không round-trip userland.
 
-Nhóm đầu tự do, mốc A, nhóm giữa tự do, mốc E, nhóm cuối tự do:
-```
-Bit:  P=0 Q=1   A=2   B=3 C=4 D=5   E=6   F=7 G=8 H=9
-
-prereq[P]=prereq[Q]           = {}          # nhóm đầu: khởi động được, tự do thứ tự
-prereq[A]                     = {P,Q}       # mốc: cần cả nhóm đầu
-prereq[B]=prereq[C]=prereq[D] = {A}         # nhóm giữa: tự do thứ tự
-prereq[E]                     = {B,C,D}     # mốc: cần cả nhóm giữa
-prereq[F]=prereq[G]=prereq[H] = {E}         # nhóm cuối: tự do thứ tự
-required_mask                 = tất cả bit
-block_at                      = E  (hoặc một step ∈ nhóm cuối, tuỳ hành động nghẽn)
-```
-
-DAG:
-```
-P ┐          B ┐          F
-  ├─► A ─►   C ┼─► E ─►   G
-Q ┘          D ┘          H
-```
-
-Trace một thứ tự hợp lệ trong nhiều thứ tự:
-```
-completed
-A  ─ prereq{P,Q} chưa đủ → IGNORE (đến sớm, chuỗi không vỡ)
-P  ─ prereq{} ok         → 0000000001
-Q  ─ prereq{} ok         → 0000000011
-A  ─ prereq{P,Q} ⊆ ok    → 0000000111        # mốc A qua → score nhảy nấc
-C  ─ prereq{A} ⊆ ok      → 0000010111        # C trước B,D — hợp lệ
-B  ─ prereq{A} ⊆ ok      → 0000011111
-E  ─ prereq{B,C,D}? D chưa → IGNORE
-D  ─ prereq{A} ⊆ ok      → 0000111111
-E  ─ prereq{B,C,D} ⊆ ok  → 0001111111        # mốc E qua → nếu đủ điểm, armed nhóm cuối
-F,H,G (bất kỳ thứ tự) ⊆ ok → 1111111111 → ACCEPT
-```
-"A đến sớm" và "E đến sớm" đều **bị bỏ qua an toàn** (không set bit, không vỡ chuỗi), rồi được
-nhận khi tiền đề đủ. Mỗi event chỉ 1 phép AND + 1 phép OR.
-
-### 5.8 Variable binding & giới hạn (khi thứ tự tự do gặp ràng buộc node)
-
-Nếu các step trong một nhóm đòi **cùng ràng buộc vào một node cụ thể** (vd "đọc file F" rồi
-"gửi *đúng* F đó ra ngoài") thì phải nhớ node nào điền step nào — đây là chỗ partial-order
-matching **tiệm cận subgraph matching**.
-```
-BINDING_OK(A, step, e):
-    for (role, uid) in step.node_constraints(e):     # vd role="file" phải trùng step trước
-        if A.bound_nodes.has(role) and A.bound_nodes[role] != uid:
-            return false                              # xung đột binding
-    return true
-
-COMMIT_STEP cũng ghi: A.bound_nodes[role] = uid
-```
-Giữ bounded bằng: **neo vào TTP hiếm trước** (cố định binding quanh node hiếm), **`scope=
-same_storyline`** (chỉ binding trong một chuỗi nhân-quả), trần số binding sống per-pattern; vượt
-trần thì **hạ cấp xuống ALERT** thay vì vét cạn. Binding mơ hồ → **giảm confidence**, không bỏ
-cũng không duyệt toàn bộ.
-
-#### Ví dụ chuẩn: dropper "ghi file X → chạy file X"
-
-Đây là ca minh hoạ vì sao binding là **bắt buộc**, không phải tối ưu:
+### 6.4 GC theo `seg_window`
 
 ```
-Pattern dropper_write_then_exec (trích 2 step):
-  step WRITE: op=write, commit: bound_nodes["dropped"] = object.uid
-  step EXEC : op=exec,  node_constraint: object.uid == bound_nodes["dropped"]
+GC_AUTOMATON(A, S, now):                # gọi trong SWEEP_A_LITTLE, lười/amortized
+    if không bước kế tiếp nào còn kịp (mọi bước enabled đã quá seg_window từ t_enabled):
+        for (role,key) in A.bound_ids:                    # NHẢ ghim
+            ent(key).refcount -= 1;  BIND_IDX[key].discard((S, role))
+        S.automata.remove(A.pattern_id)
+    # entity vừa hết refcount + nguội sẽ bị SWEEP bỏ ở lượt sau (§3)
 ```
 
-- **Không có binding** (chỉ TTP + `scope=same_storyline`): tiến trình ghi file log X rồi khởi
-  chạy app Y không liên quan vẫn set đủ 2 bit → **false positive**. `completed_mask` chỉ nhớ
-  *step nào đã xảy ra*, không nhớ *trên node nào*.
-- **Có binding**: exec Y → `BINDING_OK` false → bit không set; chỉ exec đúng X mới tiến. Chi phí
-  vẫn O(1) (một phép so sánh uid).
-
-Hai quy tắc đi kèm để binding không phản tác dụng:
-
-1. **Bind theo identity, không theo path** (§2). Kẻ tấn công ghi X rồi `rename X→Y` rồi chạy Y:
-   bind theo path → **false negative**; bind theo FileId/(dev,inode) → rename vô hiệu. Trường hợp
-   *copy* X→Y sinh FileId mới — xử lý bằng cạnh causal `create/copy` lan truyền trong storyline
-   (§3), không hash nội dung trên đường nóng.
-2. **Match đúng ≠ đáng chặn.** "Ghi X rồi chạy đúng X" là hành vi lành tính cực phổ biến
-   (installer, self-updater, package manager, build system chạy binary vừa compile). Mẫu 2 bước
-   này một mình chỉ đáng `SUSPECT`; nó nên là *một đoạn* trong DAG dài hơn, và cần scoring §6
-   kéo lên (file unsigned/chưa từng thấy → rarity; actor là process mặt-mạng browser/Office;
-   ghi vào thư mục temp/ADS) mới chạm `θ_alert`/`θ_block`. Đúng triết lý chung: đơn lẻ → cảnh
-   báo, chuỗi phủ nhiều tactic → mới chặn.
-
-> Ranh giới cần nhớ: **độ phức tạp thứ tự (DAG bao nhiêu tầng, nhóm lồng, AND/OR) là miễn phí**;
-> thứ *thật sự* đắt là variable binding + thứ tự tự do đồng thời. Nếu số step > 64, dùng bitset
-> nhiều word → O(#step/64), thực tế vẫn coi như hằng số.
+Cận số automaton sống: `seed_rate × avg_seg_window`. `seed_rate` bị siết vì bước gốc thường đặc thù
+(một LOLBin cụ thể, một PE-write). Trần cứng `MAX_AUTOMATA_GLOBAL`/`_PER_SID` chỉ là **lưới an
+toàn**: chạm trần thì endpoint **ngừng seed thêm** — event vẫn được SHIP nên backend vẫn thấy.
+**Trần luôn degrade thành "backend bắt", không bao giờ thành mất-âm-thầm.**
 
 ---
 
-## 6. KILL_CHAIN_SCORE — chấm điểm (tư duy HOLMES + RapSheet)
+## 7. Tính chính xác tại endpoint (precision)
 
-```
-function KILL_CHAIN_SCORE(A, S):
-    completed = bits(A.completed_mask)
-    stages = distinct_tactics(completed)             # số giai đoạn kill-chain đã phủ
-    sev    = Σ severity(bit) over completed
-    order_bonus = β * ORDER_OBSERVED(A)              # thứ tự là THƯỞNG, không phải điều kiện
-    rarity = Σ rarity(ttp) over completed            # neo signal hiếm (RapSheet/POIROT)
-    return w1*stages + w2*sev + w3*order_bonus + w4*rarity
+"Chính xác" nghĩa là: **khi endpoint DENY thì nó đúng** — không chặn nhầm phần mềm lành tính (với
+prevention đây là lỗi đắt nhất). Bốn hàng rào:
 
-ORDER_OBSERVED(A):
-    # tỉ lệ cặp bước đã đến ĐÚNG chiều thời gian so với gợi ý kill-chain
-    # dùng step_ts[]; partial-order vẫn accept dù sai thứ tự, chỉ mất phần thưởng này
-    return fraction_of_pairs_in_expected_temporal_order(A.step_ts)
-```
+1. **Đa-tactic mới chặn** (§6.3): trọng số làm *một mình severity không đủ*; phải phủ nhiều giai
+   đoạn kill-chain mới vượt `θ_block`.
+2. **Bind theo identity** (§2, §6.2): "ghi X rồi chạy đúng X" phân biệt được với "ghi X chạy Y" →
+   khử false-positive dropper. Ví dụ: installer/updater ghi rồi chạy *đúng* file đó → binding khớp
+   nhưng điểm thấp (đơn tactic) → chỉ SUSPECT. "Ghi X chạy Y" → binding xung đột → mẫu không accept.
+   Rename vô hiệu vì khoá FileId.
+3. **Chỉ chặn tại `block_at` enforceable, không hồi tố** (§6.3): DENY đúng hành động nghẽn hiện tại,
+   không dựa vào suy đoán quá khứ.
+4. **Endpoint chỉ tự chặn theo matcher của chính nó.** Kết luận của backend không tự biến thành
+   block; nó hạ xuống thành *arm theo identity + action cụ thể* (§9), và **kernel chỉ deny đúng
+   hành động đó trên đúng identity đó**. Backend bị lỗi/bị chiếm cũng không thể "chặn cả máy" — có
+   trần sanity (§9).
 
-Trọng số hiệu chỉnh sao cho **một mình severity không đủ chặn** — phải phủ nhiều giai đoạn kill-chain
-thì mới vượt `θ_block`. Nhờ vậy hành vi lẻ (đơn TTP) chỉ cảnh báo, chuỗi APT mới bị chặn.
-
-Với mẫu **partial-order**, thứ tự chỉ là **thưởng** (`order_bonus`), không phải điều kiện chấp
-nhận — nên đặt `θ_block` cao hơn một chút so với mẫu có thứ tự chặt để bù phần bằng chứng thời
-gian bị mất khi cho phép thứ tự tự do.
-
-`rarity(ttp)`: nghịch đảo tần suất quan sát trong baseline → TTP hiếm kéo điểm lên nhanh, giúp
-neo vào node/hành vi bất thường và thu hẹp vùng đánh giá.
+Precision đến từ **ngữ nghĩa mẫu + binding**, không từ độ lớn đồ thị. Cái endpoint nhường cho
+backend là **recall của chuỗi dài/rộng**, không phải precision.
 
 ---
 
-## 7. Chống dependency explosion & giới hạn tài nguyên
+## 8. Backend forensic — không cửa sổ, không trần
 
-| Cơ chế | Hiệu quả |
-|---|---|
-| Chỉ cạnh **causal** mới merge storyline (§3) | Chặn nổ storyline khổng lồ |
-| `MAX_AUTOMATA_PER_SID`, `MAX_NODES_PER_SID` | Trần chi phí per-event |
-| **Deadline theo đoạn** (`seg_window`, §5.6) + `GC_EXPIRED` | Trạng thái không phình vô hạn |
-| Edge coalescing (gộp write lặp cùng (actor,object)) | Giảm cạnh trùng |
-| Neo vào TTP hiếm trước khi mở rộng | Giảm vùng phải xét |
-| Automaton quá `seg_window` mà không tiến → huỷ ngay | Giải phóng bộ nhớ liên tục |
-| Bitmask ≤ 64 bước / 1 word (đa word nếu hơn) | Tiến trạng thái O(1) |
+Backend chạy **cùng lõi matcher** (RESOLVE/UNIFY/ADVANCE/SCORE) nhưng bỏ mọi ràng buộc bounded:
 
-Khi vượt trần: áp dụng **eviction** LRU theo `last_activity` cho storyline nguội, nhưng **không
-evict** storyline đang có automaton ≥ `θ_alert` (đang trong chuỗi tấn công).
+- **Đồ thị đầy đủ, bền, đa-host.** Giữ mọi cạnh + attrs; persistence ⟹ sống qua reboot. Storyline
+  graph cho SOC lấy từ đây (endpoint không còn nghĩa vụ forensic).
+- **Khâu (stitch) cái endpoint không merge.** Nhận đủ cạnh causal (nhờ SHIP), backend merge **không
+  trần** → nối lại chuỗi bị cắt tại hub hoặc tại trần kích thước, rồi chạy lại matcher trên chuỗi
+  đã khâu.
+- **Matcher không deadline.** `seg_window` nới hoặc bỏ → bắt low-and-slow kéo ngày. Được phép làm
+  phép đắt endpoint cấm: subgraph alignment, binding tổ hợp lớn, cửa sổ dài tuỳ ý.
+- **Xuyên host.** Nối identity chéo host (remote logon, SMB write A→B) → phát hiện lateral movement.
+- **Baseline rarity thật.** Đếm tần suất TTP trên toàn fleet (offline, không cần cấu trúc gần đúng)
+  → thay bảng `rarity` tĩnh; đẩy bảng mới xuống endpoint định kỳ (§9).
+- **Đo FP audit-only.** Replay stream ở chế độ không-chặn để hiệu chỉnh `θ`/trọng số trước khi bật
+  arm.
 
-> ⚠️ LRU thuần là **bẫy** (giết chuỗi lén lút + mở đòn evict-as-evasion). Chiến lược bound bộ nhớ
-> mà vẫn bắt tối đa — tách detection-state/forensic-graph, giữ-theo-nghi-ngờ, ngân sách theo nguồn,
-> sketch xác suất, spill đĩa, admission theo rarity — xem **`engine_state_optimization.md`**.
-
----
-
-## 8. DECIDE — biên với kernel (đường inline)
-
-```
-function DECIDE(verdict, e):
-    switch verdict.kind:
-        BLOCK:   return DENY            # kernel trả -EPERM / chặn I/O
-        ALERT:   log(verdict); return ALLOW
-        SUSPECT: return ALLOW
-        NONE:    return ALLOW
-```
-
-- **Fail-open**: nếu daemon quá tải/không phản hồi trong `T_budget`, kernel **allow** (ưu tiên ổn
-  định). Trạng thái "armed" đã đẩy sẵn xuống kernel giúp vẫn chặn được điểm nghẽn dù userland chậm.
-- **Latency budget**: đường single-event nguy hiểm (LSASS, vssadmin) được chặn **thẳng trong
-  kernel** bằng bảng rule tĩnh, không đợi §1–§6.
-
-### 8.1 Điểm hook theo `op` — Windows (ưu tiên thử nghiệm trước) & Linux
-
-Chọn hook phải theo tiêu chí **deny được đồng bộ** (làm `enforceable`/`block_at`), không chỉ notify:
-
-| `op` | Windows — sensor & enforcement | Deny? | Linux |
-|---|---|---|---|
-| `write`/`create`/`delete` file | Minifilter pre-op (`IRP_MJ_CREATE`, `IRP_MJ_WRITE`, `IRP_MJ_SET_INFORMATION`) | **Có** — `FLT_PREOP_COMPLETE` + `STATUS_ACCESS_DENIED` | `bpf_lsm` (`file_open`, `inode_*`) |
-| `exec` process | `PsSetCreateProcessNotifyRoutineEx` | **Có** — set `CreationStatus = STATUS_ACCESS_DENIED` | `bpf_lsm` (`bprm_check_security`) |
-| `open`/`read` process (LSASS) | `ObRegisterCallbacks` (pre-op handle) | **Có** — strip `PROCESS_VM_READ` khỏi access mask | `bpf_lsm` (`ptrace_access_check`) |
-| `inject` (remote thread) | `PsSetCreateThreadNotifyRoutine` chỉ **notify** → chặn từ gốc bằng `ObRegisterCallbacks` (strip `PROCESS_CREATE_THREAD`/`VM_WRITE` khi mở handle) | Gián tiếp | `bpf_lsm` (`ptrace`, `bpf`) |
-| `load` module/image | `PsSetLoadImageNotifyRoutine` chỉ **notify** → chặn qua minifilter tại section-map (`IRP_MJ_ACQUIRE_FOR_SECTION_SYNCHRONIZATION`) | Gián tiếp | `bpf_lsm` (`bprm`, `kernel_read_file`) |
-| registry (persistence) | `CmRegisterCallbackEx` (pre-op) | **Có** | — (tương đương: file config) |
-| `connect` | WFP callout (ALE layers) | **Có** | `bpf_lsm`/cgroup hook (`socket_connect`) |
-
-Hai điểm khớp với mô hình armed (§5.5):
-
-- **Rename/exec khép kín trong kernel:** `PsSetCreateProcessNotifyRoutineEx` cho FileObject của
-  image → lấy được **FileId** ngay tại chỗ để so với cờ armed (bind theo identity, §2/§5.8) —
-  không cần round-trip userland đúng như PUSH_KERNEL_ARM yêu cầu.
-- **"eBPF map" phía Windows** = bảng hash trong driver (nonpaged, khoá `(sid | FileId | pid)`),
-  daemon cập nhật qua IOCTL/FilterSendMessage; ngữ nghĩa giống `BPF_MAP_TYPE_HASH` chiều xuống.
+Backend **không** có verdict đồng bộ. Mọi kết luận đi xuống dưới dạng *thay đổi trạng thái* của
+endpoint (arm/watch/rule), để lần chạm kế bị chặn **trong kernel**. Không có đường "event chờ
+backend trả lời rồi mới allow" — điều đó vi phạm fail-open (§4).
 
 ---
 
-## 9. Độ phức tạp
+## 9. Kênh backend → endpoint (thực thi cái backend phát hiện)
+
+Kênh điều khiển có xác thực, đẩy trạng thái xuống endpoint:
+
+```
+ArmDirective  = { scope:IDENTITY, action, ttl, reason, seq }   # deny 'action' khi chạm 'scope'
+WatchDirective= { scope:IDENTITY, boost }                      # KHÔNG chặn — chỉ cộng điểm/ghim
+TableUpdate   = { rarity_table | rules }                       # cập nhật knob vận hành
+```
+
+- **Arm theo identity** (FileId/(pid,start)), không theo path — nhất quán §2, rename vô hiệu. Kernel
+  áp vào bảng arm (hash nonpaged trong driver) tại **hook đồng bộ**: minifilter pre-op cho
+  `write/create`, `ObRegisterCallbacks` cho mở handle process (strip `PROCESS_VM_READ`),
+  `PsSetCreateProcessNotifyRoutineEx` cho `exec` → `STATUS_ACCESS_DENIED` tại chỗ, không round-trip.
+- **Watch** là mức mềm cho kết luận chưa đủ chắc: chạm identity → storyline thăng nghi ngờ + cộng
+  điểm để matcher **cục bộ** tự vượt ngưỡng. Backend *mớm*, không *phán* thay.
+- **An toàn kênh (bề mặt tấn công mới — arm giả = DoS chặn nhầm hàng loạt):** mTLS + **ký từng
+  directive** (khoá riêng control-plane); `seq` đơn điệu (bỏ replay/lùi); **`ttl` theo lease**
+  (backend phải gia hạn; mất backend thì arm tự tan — không để trạng thái chặn mồ côi); **trần
+  sanity** `MAX_LIVE_ARMS` per-host/per-root (backend bị chiếm cũng không biến endpoint thành công
+  tắc tắt máy → từ chối + alert khi vượt).
+
+---
+
+## 10. Đứng một mình & offline
+
+Vì phát hiện cục bộ **không phụ thuộc** backend (backend chỉ cộng thêm), "offline" gần như không
+thay đổi gì:
+
+| | Online | Backend mất kết nối |
+|---|---|---|
+| Phát hiện cục bộ (§3–§7) | chạy | **y nguyên** |
+| SHIP | gửi trực tiếp | ghi **disk ring-buffer** bounded (drop cũ nhất khi đầy; counter) |
+| Arm hiện có | lease gia hạn | giữ đến hết `ttl` rồi tự rơi |
+| Phần vươn xa (stitch/cross-host/low-slow) | có | tạm mất — bắt lại khi nối lại + replay theo `seq` |
+
+Nối lại: replay ring theo `seq`; backend dedupe `(host, seq)`, đối chiếu, có thể phát arm bù. Cái
+mất khi offline **đúng bằng** phần recall-vươn-xa — không có "phình bộ nhớ" hay "mất tiến độ" nào
+để lo, vì working set vẫn bounded như thường.
+
+---
+
+## 11. Ranh giới phát hiện (trung thực)
+
+Vẽ rõ để không nhầm "endpoint nhẹ" với "endpoint yếu":
+
+- **Trong tầm endpoint (chặn hành-động-đầu-tiên, đồng bộ):** mọi chuỗi mà các đoạn nằm gọn trong
+  `seg_window` và thực thể bind còn trong cửa sổ `W`. Gần như toàn bộ ransomware-burst, đọc LSASS,
+  chuỗi exec→impact nhanh — đúng lớp mà block inline có ý nghĩa.
+- **Chỉ backend (phát hiện + arm, chịu cửa sổ trễ):** low-and-slow vượt `W`; bàn giao qua hub /
+  vượt trần merge; xuyên host; mẫu cần subgraph/binding tổ hợp lớn.
+- **Cửa sổ trễ** = từ lúc backend kết luận đến lúc arm hiệu lực trong kernel (một RTT). Hành động
+  độc **trong** cửa sổ này lọt — giới hạn vật lý của mọi kiến trúc phân tán. Hệ quả thiết kế:
+  **mẫu nào cần chặn hành-động-đầu-tiên PHẢI khớp được bằng state cục bộ** (nằm trong rule của
+  endpoint), không được chỉ trông vào backend. **Metric chính** của kiến trúc = *số hành động lọt
+  trong cửa sổ trễ* trên các kịch bản chỉ-backend-thấy.
+- **Giới hạn mô hình:** tagger nhận diện theo tên file còn giòn (cần chữ ký/hash); kênh nhân-quả
+  ngầm (WMI/COM/scheduled-task) chưa mô hình hoá — kẻ tấn công sinh tiến trình qua các kênh này cắt
+  được quan hệ cha-con, backend nhìn xa hơn nhưng vẫn chỉ thấy cạnh mà sensor phát ra.
+- **Tiền đề phải kiểm bằng số:** "ship được toàn bộ event" là giả định về băng thông ingest, nhất
+  là `write` tần suất cao — phải đo, không mặc định đúng.
+
+---
+
+## 12. Độ phức tạp & bộ nhớ
 
 | Bước | Chi phí |
 |---|---|
-| RESOLVE_NODE | O(1) hash |
-| UNIFY_STORYLINE | ~O(α) — DSU path compression |
-| TAG_TTP | O(#candidate_ttps) — hằng số nhỏ |
-| ADVANCE | O(#automata liên quan) ≤ `MAX_AUTOMATA_PER_SID` |
-| KILL_CHAIN_SCORE | O(độ dài mẫu) — hằng số |
+| TOUCH / resolve identity | O(1) hash |
+| LINK (merge có trần) | O(size storyline nhỏ) ≤ `MAX_NODES_PER_SID` |
+| SHIP | O(1) enqueue (nén/gửi off-path) |
+| TAG_TTP | O(#candidate_ttps) + O(1) cập nhật PRED |
+| ADVANCE | O(#automata trong storyline) ≤ `MAX_AUTOMATA_PER_SID` |
+| SWEEP_A_LITTLE | O(1) amortized (lười) |
 | **Tổng / event** | **O(1) amortized** |
+| **Bộ nhớ** | **O(automata sống × arity bind + event_rate × W)** — hằng số cấu hình, §3 |
 
-Không có bước nào phụ thuộc kích thước toàn graph → phù hợp streaming inline. (Trái ngược POIROT:
-subgraph isomorphism theo kích thước graph, NP-hard.)
-
----
-
-## 10. Ví dụ chạy đầu-cuối (ransomware)
-
-Mẫu có nhóm giữa **tự do thứ tự** `{T1490 inhibit recovery, T1083 file discovery}` — cả hai có
-thể xảy ra trước/sau nhau — kẹp giữa mốc đầu `T1059 (exec script)` và mốc chặn `T1486 (encrypt)`:
-```
-Pattern ransomware_fast_encrypt:
-  scope: same_storyline, block_at: T1486
-  bit:  T1059=0   T1490=1  T1083=2   T1486=3
-  prereq[T1059]              = {}                 # mốc đầu
-  prereq[T1490]=prereq[T1083]= {T1059}            # nhóm giữa: tự do thứ tự
-  prereq[T1486]              = {T1490, T1083}     # mốc chặn: cần cả nhóm giữa
-  required_mask              = {T1059,T1490,T1083,T1486}
-  T1490, T1486: enforceable ; seg_window mỗi đoạn = 60s
-
-1. exec powershell        → RESOLVE, storyline S1, TAG T1059
-                            prereq{} ok → NEW_AUTOMATON, completed=0001
-2. read nhiều thư mục     → TAG T1083, prereq{T1059} ⊆ ok → completed=0101   # nhóm giữa (thứ tự A)
-3. exec vssadmin delete   → TAG T1490, prereq{T1059} ⊆ ok → completed=0111   # nhóm giữa (thứ tự B)
-                            score ≥ θ_block, còn pending T1486 enforceable
-                            → A.armed=true; PUSH_KERNEL_ARM(S1, action=write) # vũ trang
-4. write *.docx entropy↑  → predicate T1486 đúng, prereq{T1490,T1083} ⊆ ok
-                            kernel thấy S1 đã "armed" cho write
-                            → DENY ngay trong kernel (chặn ghi mã hoá đầu tiên)
-                          → completed=1111 ACCEPT → EMIT: BLOCK, dựng storyline graph cho SOC
-```
-Bước 2 và 3 có thể đảo chiều (T1490 trước T1083) mà kết quả không đổi — đó là nhóm tự do thứ tự.
-
-Kết quả: chuỗi bị chặn **đúng tại hành động mã hoá đầu tiên**, không cần chờ userland round-trip,
-không hồi tố, và có graph đầy đủ để điều tra.
+Không bước nào phụ thuộc tổng số thực thể từng thấy, tổng cạnh, hay kích thước đồ thị toàn cục —
+phù hợp streaming inline.
 
 ---
 
-## 11. Schema RULE — cách viết mẫu (file `rules/*.rules`)
+## 13. Hằng số khởi điểm (hiệu chỉnh qua audit-only)
 
-Bộ rule **tách rời khỏi code**, nạp lúc chạy (thêm/sửa mẫu không build lại). Định dạng dòng-lệnh,
-zero-dependency (parser ở `engine/src/rules.rs`). Mỗi dòng là một **directive**; `#` là chú thích;
-dòng trống bỏ qua. Có 4 directive: `ttp`, `tagger`, `pattern`, `step`.
-
-### 11.1 `ttp` — metadata cho scoring (§6)
-```
-ttp <ID> tactic=<tactic> severity=<0..10> rarity=<0..1>
-```
-- `tactic` ∈ `execution | discovery | defense_evasion | credential_access | impact | staging`.
-- `severity` mức độ độc; `rarity` = nghịch đảo tần suất baseline (hiếm → kéo điểm nhanh, neo signal).
-- TTP không khai báo → mặc định `staging, severity=1, rarity=0.15`.
-
-### 11.2 `tagger` — luật gán TTP từ 1 event (§4)
-```
-tagger <ID> <cond> <cond> ...
-```
-Phát ra `<ID>` khi **mọi** `<cond>` đúng. Tập điều kiện là **closed-set** (không phải ngôn ngữ
-biểu thức) — đủ diễn đạt technique mà vẫn bounded/auditable:
-
-| cond | ý nghĩa |
-|---|---|
-| `op=a\|b\|c` | `e.op` thuộc tập (phân tách bằng `\|`) |
-| `image_base_in=a.exe,b.exe` | basename(`attrs.image`) thuộc tập (so sánh lowercase) |
-| `target_image_base=x.exe` | basename(`attrs.target_image`) thuộc tập |
-| `attr_true=<k>` | `attrs[k]` ∈ {`1`,`true`} |
-| `entropy_gt=<f>` | `attrs.entropy` > f |
-| `write_rate_ge=<n>` | ≥ n lần write của cùng actor trong cửa sổ trượt 1s |
-| `dir_spread_ge=<n>` | write chạm ≥ n thư mục (`attrs.dir`) trong cửa sổ 1s |
-| `cmd_recovery_inhibit` | builtin: `attrs.cmd` khớp mẫu xoá shadow/catalog/resize shadowstorage |
-
-> `write_rate_ge`/`dir_spread_ge` là **stateful nhẹ**: mọi event `op=write` tự động cộng vào bộ đếm
-> trượt của actor (dùng `attrs.dir`), cập nhật O(1). Thêm một *dạng* cond mới vẫn cần sửa code — đúng
-> chủ đích, vì tagger là lớp platform-specific (§8.1); pattern thì hoàn toàn data-driven.
-
-### 11.3 `pattern` + `step` — mẫu tương quan = precedence DAG (§5)
-```
-pattern <NAME> scope=<scope> theta_alert=<f> theta_block=<f> [root_gate=<gate>]
-  step <NAME> bit=<n> match=<matcher> [prereq=<n,n>] seg_window=<ms> [enforceable] [optional] [block] [bind=<role>:<src>]
-  step ...
-```
-Các dòng `step` gắn vào `pattern` gần nhất phía trên.
-
-**Trường của `pattern`:**
-- `scope` ∈ `same_storyline | same_actor | free` — phạm vi nhân-quả các step phải cùng (§5.4).
-- `theta_alert` / `theta_block` — ngưỡng cảnh báo / chặn (§6). Mẫu partial-order nên đặt `theta_block`
-  cao hơn để bù phần bằng chứng thứ tự bị mất.
-- `root_gate` ∈ `always | pe_write` (mặc định `always`) — cổng khởi tạo automaton, giữ số automaton
-  bounded (§7). `pe_write` = chỉ event ghi file thực thi (`attrs.pe=1`) mới seed (dùng cho dropper).
-
-**Trường của `step`:**
-- `bit=<n>` — vị trí bit trong `completed_mask` (0..63). Mỗi step một bit.
-- `match=` — điều kiện khớp step:
-  - `ttp:<ID>` — khớp khi event được gán TTP đó.
-  - `ttp_any:A|B|C` — **OR-slot**: bất kỳ TTP nào trong tập (biến thể công cụ, §5.1).
-  - `op:<op>` — khớp theo raw op (step cấu trúc, không cần TTP).
-- `prereq=<n,n>` — các bit phải xong **trước** (mã hoá thứ tự bộ phận). Bỏ trống ⇒ **step gốc** (khởi
-  động được). "x phải đầu", "nhóm tự do", "mốc giữa" đều rơi ra từ `prereq` (§5.1).
-- `seg_window=<ms>` — deadline cục bộ tính từ khi `prereq` vừa đủ (§5.6). Chuỗi dài không bị siết bởi
-  một window toàn cục.
-- `enforceable` (cờ) — step là điểm nghẽn chặn đồng bộ được (§8.1).
-- `optional` (cờ) — không nằm trong `required_mask` (không bắt buộc để ACCEPT).
-- `block` (cờ) — đánh dấu `block_at`: điểm engine ra verdict BLOCK / vũ trang kernel.
-- `bind=<role>:<src>` — ràng buộc biến (§5.8). `src` ∈ `object | image | actor`. Cùng `role` ở nhiều
-  step phải phân giải về **cùng một node identity**; xung đột ⇒ step không khớp. Đây là thứ phân biệt
-  "ghi X rồi chạy X" với "ghi X rồi chạy Y".
-
-`required_mask` = OR các bit **không** `optional`. ACCEPT ⟺ `(completed_mask & required_mask) ==
-required_mask` (§5.4).
-
-### 11.4 Ví dụ đầy đủ (dropper + ransomware, trích `rules/builtin.rules`)
-```
-ttp T1059 tactic=execution       severity=3 rarity=0.10
-ttp T1490 tactic=defense_evasion severity=7 rarity=0.80
-ttp T1486 tactic=impact          severity=9 rarity=0.90
-
-tagger T1059 op=exec image_base_in=powershell.exe,cmd.exe,wscript.exe,mshta.exe
-tagger T1490 op=exec image_base_in=vssadmin.exe,wbadmin.exe,bcdedit.exe cmd_recovery_inhibit
-tagger T1486 op=write entropy_gt=0.85 write_rate_ge=3 dir_spread_ge=2
-
-# dropper: ghi X -> chạy X (binding theo identity). Tự thân chỉ SUSPECT.
-pattern dropper_write_then_exec scope=same_storyline theta_alert=6 theta_block=12 root_gate=pe_write
-  step write_executable bit=0 match=op:write prereq=  seg_window=300000             bind=dropped:object
-  step exec_dropped     bit=1 match=op:exec  prereq=0 seg_window=300000 enforceable bind=dropped:image block
-
-# ransomware: T1059 -> {T1490, T1083} (nhóm giữa tự do) -> T1486
-pattern ransomware_fast_encrypt scope=same_storyline theta_alert=6 theta_block=12
-  step T1059 bit=0 match=ttp:T1059 prereq=    seg_window=120000
-  step T1490 bit=1 match=ttp:T1490 prereq=0   seg_window=120000 enforceable
-  step T1083 bit=2 match=ttp:T1083 prereq=0   seg_window=120000
-  step T1486 bit=3 match=ttp:T1486 prereq=1,2 seg_window=120000 enforceable block
-```
-
----
-
-## 12. Schema DATASET — cách viết telemetry thử nghiệm (file `datasets/*.evt`)
-
-Dataset mô phỏng luồng event đã chuẩn hoá đưa vào lõi (thay cho sensor kernel), dùng để replay
-audit-mode và test. Một event mỗi dòng, các cặp `key=value` cách nhau bằng khoảng trắng; value chứa
-dấu cách thì bọc `"..."`; `#` là chú thích (parser ở `engine/src/dataset.rs`).
-
-### 12.1 Khoá cấu trúc (5 khoá đặc biệt) + attrs
-| key | bắt buộc | ý nghĩa | định dạng |
-|---|---|---|---|
-| `ts` | có | timestamp ms, **đơn điệu tăng** | số nguyên |
-| `op` | có | loại thao tác | `exec\|open\|read\|write\|connect\|inject\|create\|delete\|load\|dup` |
-| `actor` | có | process gây hành động (luôn là process) | `<pid>.<start_ts>` |
-| `object` | có | đối tượng bị tác động | `proc:<pid>.<start>` \| `file:<FileId>` \| `sock:<key>` \| `<kind>:<key>` |
-| `image` | tùy | (exec) FileId của ảnh thực thi | token file (dùng cho `image_base_in` & `bind=…:image`) |
-| *khác* | tùy | thuộc tính → `attrs` | `entropy=0.96`, `cmd="..."`, `enum=1`, `pe=1`, `dir=...`, `vm_read=1`, `target_image=...` |
-
-Quy ước quan trọng:
-- **Process key = `pid.start_ts`** chống pid-reuse (§2): `200.5` và `200.9` là hai node khác nhau.
-- **`file:<FileId>`** — token đóng vai **FileId trừu tượng**: hai event dùng **cùng token** ⇒ **cùng
-  một file identity** (rename giữ nguyên token; copy đổi token). Đây là cách dataset mô phỏng binding
-  theo identity (§5.8) thay vì theo path.
-- **`op` causal** (`exec/inject/create/dup/write`) hợp nhất storyline actor↔object (§3); `read/open/
-  connect` chỉ ghi cạnh, không merge.
-- Ở `exec`: `object` = **process con** (cho spawn/storyline), `image` = **file ảnh** (cho tagging &
-  binding). Một callback process-create thật cung cấp cả hai.
-
-### 12.2 attrs mà các tagger builtin cần
-| attr | tagger dùng | ví dụ |
+| Hằng số | Mặc định | Ý nghĩa |
 |---|---|---|
-| `image` | T1059/T1490 (`image_base_in`), binding image | `image=C:\...\powershell.exe` |
-| `cmd` | T1490 (`cmd_recovery_inhibit`) | `cmd="delete shadows /all /quiet"` |
-| `enum` | T1083 (`attr_true=enum`) | `enum=1` |
-| `entropy`,`dir` | T1486 (`entropy_gt`,`dir_spread_ge`) | `entropy=0.96 dir=C:\Users\a\Documents` |
-| `target_image`,`vm_read` | T1003 (`target_image_base`,`attr_true=vm_read`) | `target_image=C:\...\lsass.exe vm_read=1` |
-| `pe` | `root_gate=pe_write` | `pe=1` (file thực thi) |
+| `W` (cửa sổ working-set) | 120 s | thực thể không-bind nguội quá W → bỏ (§3) |
+| `MAX_NODES_PER_SID` | 4 096 | trần kích thước storyline (van hub, §5) |
+| `MAX_AUTOMATA_PER_SID` | 32 | trần chi phí per-event một storyline |
+| `MAX_AUTOMATA_GLOBAL` | 100 000 | lưới an toàn tổng (≈ vài chục MB) |
+| `MAX_BIND_ARITY` | 8 | số role bind tối đa/pattern (kẹp thành phần "bị ghim") |
+| `SHIP_RING` | 64k event RAM / 512 MB đĩa | hàng đợi + spill offline (§10) |
+| `ARM_TTL` | 15 phút (lease) | arm tự tan nếu backend không gia hạn (§9) |
+| `MAX_LIVE_ARMS` | 1 000/host · 64/root | trần sanity chống backend-bị-chiếm (§9) |
 
-### 12.3 Ví dụ (trích `datasets/ransomware.evt`)
-```
-ts=1000 op=exec  actor=100.1 object=proc:200.5  image=C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe cmd="-enc SQBFAFgA"
-ts=1500 op=open  actor=200.5 object=file:DIR_documents enum=1
-ts=2000 op=exec  actor=200.5 object=proc:300.10 image=C:\Windows\System32\vssadmin.exe cmd="delete shadows /all /quiet"
-ts=2500 op=write actor=200.5 object=file:DOC1 dir=C:\Users\a\Documents entropy=0.96 pe=0
-```
-→ exec powershell (T1059, seed automaton) → open enum (T1083) → exec vssadmin (T1490, ARM) → write
-entropy cao (bị DENY do storyline đã armed). Xem `engine/README.md` cho bảng dataset & kết quả kỳ vọng.
-
-### 12.4 Chạy
-```
-cargo run --bin edr-replay -- datasets/<x>.evt [rules/<y>.rules]   # audit-mode; rule tùy chọn
-cargo test                                                         # test hành vi
-```
-
----
-
-## 13. Giới hạn hiện tại
-
-Ghi lại trung thực các giới hạn của bản hiện tại để không nhầm "chạy trên dữ liệu giả" với "dùng
-được trên endpoint thật". Chia hai nhóm: **(A) khoảng cách prototype ↔ thiết kế** (thiết kế có, code
-chưa làm) và **(B) giới hạn mô hình & đối kháng** (thuộc bản chất, cần nghiên cứu thêm).
-
-> Ngoài phạm vi mục này: phần **sensor kernel** và **đường enforcement thật** (chặn đồng bộ trong
-> kernel, ngân sách latency, fail-open) — được coi là hạng mục kiến trúc riêng, không liệt kê ở đây.
-
-### 13.1 (A) Khoảng cách prototype ↔ thiết kế
-
-- **Không có GC / eviction / trần tài nguyên.** §7 mô tả `GC_EXPIRED`, `MAX_AUTOMATA_PER_SID`,
-  `MAX_NODES_PER_SID`, eviction LRU — code **chưa** implement cái nào. Automaton không bị xoá sau
-  accept/block hay khi quá `seg_window` (seg_window chỉ chặn *commit* bước muộn, không giải phóng
-  automaton); storyline chỉ bị xoá khi merge. ⟹ chạy dài trên luồng event thật → **phình bộ nhớ vô
-  hạn / OOM**. Đây là khoảng cách rõ nhất.
-- **`completed_mask` là `u64` → tối đa 64 bước/mẫu.** Đa-word (§5.8) chưa làm; mẫu > 64 bước không
-  biểu diễn được.
-- **Chưa có trần binding / hạ cấp ALERT.** §5.8 yêu cầu giới hạn số binding sống và hạ cấp thay vì
-  vét cạn khi vượt trần — code chưa có, nên góc "binding + thứ tự tự do" (tiệm cận subgraph matching)
-  hiện **không có phanh**.
-- **Không lưu trạng thái bền (persistence).** Toàn bộ graph/automata ở in-memory, mất khi restart →
-  tấn công kéo dài qua reboot bị mất storyline. Chưa có snapshot.
-- **Độ phủ luật mỏng.** Chỉ 5 tagger (T1059/T1083/T1490/T1486/T1003) và 3 mẫu demo; thực tế cần hàng
-  trăm. Tagger là logic **Windows hardcode** trong `rules.rs`; nhánh Linux mới ở mức thiết kế (chưa
-  tách `platform/windows` · `platform/linux`).
-- **Identity/FileId chưa xử lý thật.** Prototype dùng token chuỗi trừu tượng; chưa implement FileId
-  128-bit + VolumeGuid + sequence, chưa vô hiệu node khi `delete`, chưa chống MFT-reuse / đụng độ
-  volume-serial, chưa degrade trên FAT/exFAT/mạng (xem §2). Binding hiện chỉ an toàn *trong mô phỏng*.
-- **Kiểm thử/benchmark hạn chế.** Mới 4 test hành vi trên dữ liệu tự chế; **chưa** chạy DARPA TC,
-  chưa red-team, chưa đo hiệu năng thật (throughput/latency dưới tải event thực). "O(1)" là phân
-  tích, chưa có số đo.
-
-### 13.2 (B) Giới hạn mô hình & đối kháng
-
-- **Phát hiện phụ thuộc chuỗi phải chạm một bước "arm được" trước khi gây hại.** Ví dụ: ransomware
-  đi thẳng `T1059 → T1486` (bỏ discovery và xoá shadow) thì mẫu không đủ nhóm giữa → **không arm,
-  không chặn**. Kể cả khi có, predicate T1486 cần 3 write/2 thư mục → **ít nhất 2 file đã mã hoá**
-  trước khi tagger bật; chỉ cơ chế arm (từ T1490) mới cứu được file đầu tiên.
-- **Storyline vỡ là mất tất cả.** Mô hình nhân-quả hiện đơn giản (exec cha-con, write file). Windows
-  có nhiều kênh nhân-quả ngầm — WMI, COM/ALPC, scheduled task, service creation, kế thừa
-  token/handle — **chưa mô hình hoá**. Kẻ tấn công sinh tiến trình qua WMI để cắt quan hệ cha-con
-  ⟹ chuỗi bị chia nhỏ, correlation thất bại.
-- **Tagger nhận diện theo tên file — giòn.** Copy `powershell.exe` → `a.exe` rồi chạy: basename
-  không khớp tập → **T1059 trượt → cả mẫu không seed**. Cần khoá theo chữ ký / `OriginalFilename` /
-  hash thay vì tên.
-- **Scoring chưa hiệu chỉnh.** Trọng số `w1..w4`, ngưỡng `θ`, bảng severity/rarity là **số chỉnh tay
-  cho demo**; `rarity` tĩnh, không đo từ baseline thật. Chưa có audit-only đo tỉ lệ false-positive —
-  mà với prevention, **FP = chặn nhầm phần mềm hợp lệ**, là lỗi đắt nhất.
-- **Né bằng mimicry / chuỗi im lặng / chậm dưới window.** Làm chuỗi độc trông như installer
-  ("ghi X chạy X") để ở mức SUSPECT; tránh TTP hiếm/ồn để không đủ điểm arm; kéo giãn từng đoạn để
-  không đoạn nào vượt `seg_window`.
-- **Chỉ trên một host.** Không correlate xuyên host (lateral movement) inline — phải đẩy lên backend.
-- **Không tự bảo vệ (self-protection).** Chưa chống kẻ tấn công đủ quyền tắt agent, gỡ driver, hay
-  **sửa file rule** (`rules/*.rules` là plaintext, không ký/không bảo vệ toàn vẹn).
-
-> Ưu tiên thu hẹp: (1) implement GC + trần tài nguyên (§13.1) để không OOM; (2) tagger theo chữ
-> ký/hash + mở rộng độ phủ; (3) chế độ audit-only + đo FP trên telemetry thật để hiệu chỉnh ngưỡng;
-> (4) mô hình thêm kênh nhân-quả ngầm (WMI/COM/service) để storyline không dễ vỡ.
+`W` và `seg_window` cùng quyết định *ranh giới tầm endpoint* (§11): nới chúng = bắt được chuỗi dài
+hơn tại chỗ, đổi bằng RAM (`event_rate × W`). Đây là **một** núm đánh đổi trực giác — trực tiếp
+giữa recall cục bộ và bộ nhớ.

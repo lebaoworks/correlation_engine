@@ -1,0 +1,6 @@
+# BENIGN: an installer / self-updater writes an executable then runs THAT SAME file.
+# The dropper pattern MATCHES (write X -> exec X, binding holds) but on its own it is
+# only low-value -> SUSPECT, never DENY. This is the "match != block" case (engine.md
+# §5.8 rule 2): installers, updaters, package managers, build systems all do this.
+ts=1000 op=write actor=500.1 object=file:F_updater dir="C:\Program Files\App" entropy=0.42 pe=1
+ts=1200 op=exec  actor=500.1 object=proc:600.2 image=F_updater cmd="/silent /update"

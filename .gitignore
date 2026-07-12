@@ -1,6 +1,35 @@
-# Rust build artifacts
-/engine/target/
+# Rust build artifacts — workspace builds everything into the root target/.
+# Generated code (prost output) lives under target/ too, so it never gets committed;
+# `cargo build` regenerates it from proto/wire.proto on any clone.
+/target/
+# Stray per-crate target dirs from building a single crate outside the workspace.
+**/target/
 **/*.rs.bk
+
+# Visual Studio / Windows driver build artifacts (sensor/windows_driver).
+# Per-config output dirs (x64/Debug, x64/Release, Win32/, ARM64/ ...) and caches.
+**/.vs/
+**/[Dd]ebug/
+**/[Rr]elease/
+**/x64/
+**/Win32/
+**/ARM64/
+**/ipch/
+*.obj
+*.sys
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.tlog
+*.log
+*.lastbuildstate
+*.idb
+*.vcxproj.user
+*.aps
+*.opendb
+*.suo
+*.CppClean.log
 
 # scratch / editor
 .DS_Store

@@ -1,0 +1,12 @@
+# Workspace: 4 thành phần tách bạch (docs/todo.md — Thiết kế backend, giai đoạn 0)
+#   engine/           lõi phát hiện (endpoint half + backend half, thư viện, zero-dep)
+#   proto/            contract trao đổi endpoint-service ↔ backend-service (wire.proto + codec)
+#   endpoint_service/ console app cầu nối sensor(kernel) ↔ engine, ship wire lên backend
+#   backend_service/  console app giữ full provenance graph, hiển thị storyline khi có alert
+[workspace]
+resolver = "2"
+members = ["engine", "proto", "endpoint_service", "backend_service"]
+exclude = ["bak"]
+
+[profile.release]
+opt-level = 3

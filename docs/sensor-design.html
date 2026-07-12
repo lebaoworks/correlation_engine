@@ -1,0 +1,578 @@
+<title>SnsDrv — Kernel Sensor Design</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#141b24; --panel-2:#1a2230;
+    --edge:rgba(200,215,235,.10); --edge-2:rgba(200,215,235,.18);
+    --ink:#dbe3ec; --ink-2:#93a1b2; --ink-3:#61707f;
+    --telemetry:#45b3c7; --enforce:#e6a13a; --control:#9a8cf2;
+    --deny:#eb6259; --ok:#56c08a;
+    --accent:var(--enforce);
+    --mono:ui-monospace,"Cascadia Code","JetBrains Mono","SF Mono",Menlo,Consolas,monospace;
+    --sans:system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    --maxw:1120px; --prose:66ch;
+    --r:3px;
+  }
+  @media (prefers-color-scheme: light){
+    :root{
+      --bg:#e7ebf0; --panel:#ffffff; --panel-2:#eef2f6;
+      --edge:rgba(20,35,55,.12); --edge-2:rgba(20,35,55,.22);
+      --ink:#172029; --ink-2:#4e5b68; --ink-3:#7c8894;
+      --telemetry:#14788a; --enforce:#a86c0d; --control:#5a4ecb;
+      --deny:#c2382f; --ok:#2f8f5f;
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#0d1117; --panel:#141b24; --panel-2:#1a2230;
+    --edge:rgba(200,215,235,.10); --edge-2:rgba(200,215,235,.18);
+    --ink:#dbe3ec; --ink-2:#93a1b2; --ink-3:#61707f;
+    --telemetry:#45b3c7; --enforce:#e6a13a; --control:#9a8cf2;
+    --deny:#eb6259; --ok:#56c08a;
+  }
+  :root[data-theme="light"]{
+    --bg:#e7ebf0; --panel:#ffffff; --panel-2:#eef2f6;
+    --edge:rgba(20,35,55,.12); --edge-2:rgba(20,35,55,.22);
+    --ink:#172029; --ink-2:#4e5b68; --ink-3:#7c8894;
+    --telemetry:#14788a; --enforce:#a86c0d; --control:#5a4ecb;
+    --deny:#c2382f; --ok:#2f8f5f;
+  }
+
+  *{box-sizing:border-box}
+  html{-webkit-text-size-adjust:100%}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font-family:var(--sans); font-size:16px; line-height:1.62;
+    background-image:radial-gradient(var(--edge) 1px,transparent 1px);
+    background-size:26px 26px; background-position:-13px -13px;
+  }
+  .wrap{max-width:var(--maxw); margin:0 auto; padding:0 clamp(16px,4vw,40px)}
+
+  a{color:var(--accent)}
+  ::selection{background:var(--accent); color:var(--bg)}
+  :focus-visible{outline:2px solid var(--accent); outline-offset:2px}
+
+  /* ---- top status bar ---- */
+  .topbar{
+    border-bottom:1px solid var(--edge-2); background:color-mix(in srgb,var(--panel) 86%,transparent);
+    backdrop-filter:blur(6px); position:sticky; top:0; z-index:5;
+  }
+  .topbar .wrap{display:flex; align-items:center; gap:16px; height:46px;
+    font-family:var(--mono); font-size:.72rem; letter-spacing:.06em}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--ok);
+    box-shadow:0 0 0 3px color-mix(in srgb,var(--ok) 22%,transparent)}
+  .topbar b{color:var(--ink); font-weight:600}
+  .topbar .sp{color:var(--ink-3)}
+  .topbar .right{margin-left:auto; color:var(--ink-2); display:flex; gap:14px}
+  @media (max-width:640px){ .topbar .right{display:none} }
+
+  /* ---- eyebrow / headings ---- */
+  .ey{font-family:var(--mono); font-size:.72rem; letter-spacing:.18em;
+    text-transform:uppercase; color:var(--ink-3); display:block}
+  h1,h2,h3{font-family:var(--mono); font-weight:600; text-wrap:balance; line-height:1.15}
+  h1{font-size:clamp(2rem,5vw,3.1rem); letter-spacing:-.01em; margin:.3em 0 .2em}
+  h2{font-size:clamp(1.3rem,3vw,1.7rem); margin:0 0 .1em; letter-spacing:-.005em}
+  h3{font-size:1rem; margin:0 0 .4em; letter-spacing:.01em}
+  p{margin:.6em 0; max-width:var(--prose); color:var(--ink)}
+  .lead{font-size:1.12rem; color:var(--ink-2); max-width:60ch}
+  strong{color:var(--ink); font-weight:600}
+  code{font-family:var(--mono); font-size:.86em; background:var(--panel-2);
+    border:1px solid var(--edge); border-radius:var(--r); padding:.08em .38em; color:var(--ink)}
+
+  /* ---- section scaffolding ---- */
+  section{padding:clamp(40px,6vw,72px) 0; border-top:1px solid var(--edge)}
+  .sechead{display:flex; align-items:baseline; gap:14px; margin-bottom:1.6em; flex-wrap:wrap}
+  .sechead .num{font-family:var(--mono); font-size:.8rem; color:var(--accent);
+    border:1px solid var(--edge-2); border-radius:var(--r); padding:.1em .5em}
+
+  /* ---- hero ---- */
+  .hero{padding:clamp(48px,8vw,96px) 0 clamp(36px,5vw,60px)}
+  .hero .kick{display:flex; gap:10px; flex-wrap:wrap; margin-bottom:1.4em}
+  .tag{font-family:var(--mono); font-size:.7rem; letter-spacing:.08em;
+    border:1px solid var(--edge-2); border-radius:100px; padding:.28em .7em; color:var(--ink-2)}
+  .tag b{color:var(--ink)}
+  .metarow{display:flex; gap:28px; flex-wrap:wrap; margin-top:1.8em;
+    font-family:var(--mono); font-size:.8rem}
+  .metarow div{display:flex; flex-direction:column; gap:2px}
+  .metarow span{color:var(--ink-3); letter-spacing:.1em; text-transform:uppercase; font-size:.66rem}
+  .metarow b{color:var(--ink); font-weight:600; font-size:.92rem}
+
+  /* ---- plane cards ---- */
+  .planes{display:grid; grid-template-columns:repeat(3,1fr); gap:16px}
+  @media (max-width:820px){ .planes{grid-template-columns:1fr} }
+  .plane{background:var(--panel); border:1px solid var(--edge-2); border-radius:var(--r);
+    padding:22px; position:relative; overflow:hidden}
+  .plane::before{content:""; position:absolute; inset:0 0 auto 0; height:3px; background:var(--pc)}
+  .plane .pe{font-family:var(--mono); font-size:.7rem; letter-spacing:.14em; text-transform:uppercase; color:var(--pc)}
+  .plane h3{margin:.5em 0 .3em}
+  .plane p{font-size:.92rem; color:var(--ink-2); margin:.3em 0}
+  .plane .spec{margin-top:14px; padding-top:12px; border-top:1px dashed var(--edge-2);
+    font-family:var(--mono); font-size:.74rem; color:var(--ink-3); display:grid; gap:4px}
+  .plane .spec b{color:var(--ink-2); font-weight:500}
+  .p-t{--pc:var(--telemetry)} .p-e{--pc:var(--enforce)} .p-c{--pc:var(--control)}
+
+  /* ---- diagram ---- */
+  .figure{background:var(--panel); border:1px solid var(--edge-2); border-radius:var(--r);
+    padding:8px; overflow-x:auto}
+  .figure svg{display:block; min-width:900px; width:100%; height:auto}
+  .legend{display:flex; gap:20px; flex-wrap:wrap; margin-top:14px; font-family:var(--mono); font-size:.74rem; color:var(--ink-2)}
+  .legend i{display:inline-block; width:22px; height:0; border-top:2px solid currentColor; vertical-align:middle; margin-right:6px}
+  .lg-t{color:var(--telemetry)} .lg-e{color:var(--enforce)} .lg-c{color:var(--control)}
+  .cap{font-family:var(--mono); font-size:.76rem; color:var(--ink-3); margin-top:10px}
+
+  /* svg helpers via classes */
+  text{font-family:var(--mono)}
+
+  /* ---- generic table ---- */
+  .tablewrap{overflow-x:auto; border:1px solid var(--edge-2); border-radius:var(--r); background:var(--panel)}
+  table{border-collapse:collapse; width:100%; min-width:640px; font-size:.86rem}
+  th,td{text-align:left; padding:11px 14px; border-bottom:1px solid var(--edge)}
+  thead th{font-family:var(--mono); font-size:.68rem; letter-spacing:.1em; text-transform:uppercase;
+    color:var(--ink-3); font-weight:600; background:var(--panel-2)}
+  tbody tr:last-child td{border-bottom:none}
+  td.mono,th.mono{font-family:var(--mono)}
+  .num-col{font-variant-numeric:tabular-nums}
+  .irql{font-family:var(--mono); font-size:.72rem; padding:.15em .5em; border-radius:100px; border:1px solid var(--edge-2); white-space:nowrap}
+  .irql.passive{color:var(--ok)}
+  .irql.apc{color:var(--enforce)}
+  .irql.dispatch{color:var(--deny)}
+  .pill{font-family:var(--mono); font-size:.7rem; padding:.12em .5em; border-radius:var(--r); border:1px solid var(--edge-2); white-space:nowrap}
+  .pill.sync{color:var(--enforce); border-color:color-mix(in srgb,var(--enforce) 40%,var(--edge-2))}
+  .pill.async{color:var(--telemetry); border-color:color-mix(in srgb,var(--telemetry) 40%,var(--edge-2))}
+  .pill.no{color:var(--ink-3)}
+
+  /* ---- component grid ---- */
+  .comps{display:grid; grid-template-columns:repeat(2,1fr); gap:14px}
+  @media (max-width:760px){ .comps{grid-template-columns:1fr} }
+  .comp{background:var(--panel); border:1px solid var(--edge); border-radius:var(--r); padding:18px}
+  .comp .fn{font-family:var(--mono); font-size:.72rem; color:var(--ink-3)}
+  .comp h3{font-size:.98rem; margin:.35em 0 .5em; display:flex; align-items:center; gap:8px}
+  .comp h3 .k{font-family:var(--mono); font-size:.62rem; letter-spacing:.08em; text-transform:uppercase;
+    color:var(--bg); background:var(--ink-2); border-radius:2px; padding:.14em .45em}
+  .comp p{font-size:.88rem; color:var(--ink-2); margin:.25em 0}
+  .comp ul{margin:.5em 0 0; padding-left:1.1em; font-size:.84rem; color:var(--ink-2)}
+  .comp li{margin:.2em 0}
+  .comp li b{color:var(--ink)}
+  .k-t{background:var(--telemetry)!important} .k-e{background:var(--enforce)!important}
+  .k-c{background:var(--control)!important}
+
+  /* ---- byte strip ---- */
+  .strip{display:flex; border:1px solid var(--edge-2); border-radius:var(--r); overflow:hidden; min-width:720px}
+  .stripwrap{overflow-x:auto; padding-bottom:4px}
+  .strip .cell{padding:12px 8px; border-right:1px solid var(--bg); text-align:center;
+    font-family:var(--mono); font-size:.72rem; color:var(--ink); position:relative}
+  .strip .cell:last-child{border-right:none}
+  .strip .cell .off{display:block; font-size:.6rem; color:var(--ink-3); margin-bottom:3px}
+  .strip .cell .nm{display:block; font-weight:600}
+  .strip .cell .sz{display:block; font-size:.6rem; color:var(--ink-3); margin-top:3px}
+  .c-id{background:color-mix(in srgb,var(--enforce) 20%,var(--panel))}
+  .c-time{background:color-mix(in srgb,var(--telemetry) 20%,var(--panel))}
+  .c-meta{background:var(--panel-2)}
+  .c-pad{background:transparent; color:var(--ink-3)!important}
+
+  .note{border-left:2px solid var(--accent); background:var(--panel);
+    padding:14px 18px; border-radius:0 var(--r) var(--r) 0; margin:20px 0; max-width:var(--prose)}
+  .note p{margin:.2em 0; font-size:.92rem}
+  .note .t{font-family:var(--mono); font-size:.68rem; letter-spacing:.12em; text-transform:uppercase; color:var(--accent)}
+
+  /* ---- arm vs block ---- */
+  .compare{display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-top:8px}
+  @media (max-width:760px){ .compare{grid-template-columns:1fr} }
+  .avb{background:var(--panel); border:1px solid var(--edge-2); border-radius:var(--r); padding:20px}
+  .avb .h{font-family:var(--mono); font-weight:600; font-size:1rem; display:flex; align-items:center; gap:8px}
+  .avb.arm .h{color:var(--enforce)} .avb.block .h{color:var(--deny)}
+  .avb p{font-size:.9rem; color:var(--ink-2)}
+  .avb dl{margin:12px 0 0; display:grid; grid-template-columns:auto 1fr; gap:6px 12px; font-size:.82rem}
+  .avb dt{font-family:var(--mono); color:var(--ink-3); font-size:.72rem}
+  .avb dd{margin:0; color:var(--ink)}
+
+  .timeline{font-family:var(--mono); font-size:.82rem; background:var(--panel);
+    border:1px solid var(--edge-2); border-radius:var(--r); padding:18px; overflow-x:auto; margin-top:18px; line-height:1.9}
+  .timeline .step{white-space:nowrap}
+  .timeline .arm{color:var(--enforce)} .timeline .blk{color:var(--deny)}
+  .timeline .dim{color:var(--ink-3)}
+
+  /* ---- lifecycle ---- */
+  .life{display:grid; grid-template-columns:1fr 1fr; gap:16px}
+  @media (max-width:760px){ .life{grid-template-columns:1fr} }
+  .life .col{background:var(--panel); border:1px solid var(--edge); border-radius:var(--r); padding:18px}
+  .life ol{margin:.5em 0 0; padding-left:0; list-style:none; counter-reset:s; font-family:var(--mono); font-size:.82rem}
+  .life li{counter-increment:s; padding:6px 0 6px 34px; position:relative; border-bottom:1px dashed var(--edge)}
+  .life li:last-child{border-bottom:none}
+  .life li::before{content:counter(s,decimal-leading-zero); position:absolute; left:0; color:var(--ink-3); font-size:.72rem}
+  .life li b{color:var(--ink)}
+  .life li .cm{color:var(--ink-3); font-size:.76rem}
+
+  footer{border-top:1px solid var(--edge-2); padding:36px 0 60px; color:var(--ink-3); font-family:var(--mono); font-size:.76rem}
+  footer .wrap{display:flex; justify-content:space-between; gap:16px; flex-wrap:wrap}
+
+  @media (prefers-reduced-motion:no-preference){
+    .plane,.comp,.avb{transition:border-color .2s ease, transform .2s ease}
+    .comp:hover{border-color:var(--edge-2)}
+  }
+</style>
+
+<div class="topbar"><div class="wrap">
+  <span class="dot" aria-hidden="true"></span>
+  <b>SnsDrv</b><span class="sp">/</span><span>kernel sensor</span>
+  <span class="right">
+    <span>wire&nbsp;v2</span><span>WDK&nbsp;10.0.26100</span><span>SnsDrv.sys&nbsp;·&nbsp;0&nbsp;warnings</span>
+  </span>
+</div></div>
+
+<header class="hero"><div class="wrap">
+  <div class="kick">
+    <span class="tag"><b>minifilter</b> + ObCallbacks + WFP</span>
+    <span class="tag">Windows kernel-mode</span>
+    <span class="tag"><b>inline</b> behavioral prevention</span>
+  </div>
+  <span class="ey">Design specification</span>
+  <h1>The SnsDrv sensor</h1>
+  <p class="lead">A kernel driver that watches the OS event surface, ships normalized telemetry to a userland engine, and enforces the engine's block decisions inline — routing latency onto the one path that actually needs it.</p>
+  <div class="metarow">
+    <div><span>Runs in</span><b>Kernel (ring&nbsp;0)</b></div>
+    <div><span>Talks to</span><b>edr-service (Rust)</b></div>
+    <div><span>Channel</span><b>\SnsDrvPort</b></div>
+    <div><span>Planes</span><b>Telemetry · Enforce · Control</b></div>
+  </div>
+</div></header>
+
+<main>
+
+<!-- 01 OVERVIEW -->
+<section id="planes"><div class="wrap">
+  <div class="sechead"><span class="num">01</span><div>
+    <span class="ey">Overview</span><h2>Three planes, one port</h2>
+  </div></div>
+  <p>Every design choice below serves a single goal: <strong>enforcement latency falls only on events that can actually block.</strong> The bulk of traffic is fire-and-forget telemetry; a tiny, dynamically-chosen set of operations is enforced synchronously; and a control sideband tells the kernel which ones.</p>
+  <div class="planes">
+    <div class="plane p-t">
+      <span class="pe">Plane 01</span>
+      <h3>Telemetry</h3>
+      <p>Every observed event, shipped up asynchronously so the engine can build its forensic storyline. Blocks nothing; never waits.</p>
+      <div class="spec">
+        <b>dir&nbsp;&nbsp;&nbsp;kernel → service</b>
+        <b>send&nbsp;&nbsp;FltSendMessage · no reply</b>
+        <b>path&nbsp;&nbsp;callback → Queue → Worker</b>
+      </div>
+    </div>
+    <div class="plane p-e">
+      <span class="pe">Plane 02</span>
+      <h3>Enforcement</h3>
+      <p>The rare armed / chokepoint event. Sent synchronously, the callback blocks for a verdict, then allows or denies the operation in place.</p>
+      <div class="spec">
+        <b>dir&nbsp;&nbsp;&nbsp;kernel ⇄ service</b>
+        <b>send&nbsp;&nbsp;SendWithReply · 20&nbsp;ms · fail-open</b>
+        <b>path&nbsp;&nbsp;callback → EnforceSync</b>
+      </div>
+    </div>
+    <div class="plane p-c">
+      <span class="pe">Plane 03</span>
+      <h3>Control</h3>
+      <p>The engine pushes ARM / DISARM down so the kernel knows which <code>(pid, op)</code> to intercept. Also registers the service pid for exemption.</p>
+      <div class="spec">
+        <b>dir&nbsp;&nbsp;&nbsp;service → kernel</b>
+        <b>send&nbsp;&nbsp;FilterSendMessage · 16&nbsp;B recs</b>
+        <b>path&nbsp;&nbsp;MessageNotify → ArmTable</b>
+      </div>
+    </div>
+  </div>
+</div></section>
+
+<!-- 02 ARCHITECTURE -->
+<section id="arch"><div class="wrap">
+  <div class="sechead"><span class="num">02</span><div>
+    <span class="ey">Data flow</span><h2>Architecture</h2>
+  </div></div>
+  <p>Kernel event sources on the left feed a routing decision. Non-armed events take the async telemetry lane through the queue and worker thread; the armed identity and the static lsass chokepoint take the sync enforcement lane straight out. The control lane runs back the other way, keeping the arm table current.</p>
+
+  <div class="figure">
+    <svg viewBox="0 0 1000 560" role="img" aria-label="Three-plane architecture: kernel event sources route to telemetry, enforcement, and control lanes crossing the port boundary to the userland service.">
+      <defs>
+        <marker id="aT" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="var(--telemetry)"/></marker>
+        <marker id="aE" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="var(--enforce)"/></marker>
+        <marker id="aC" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="var(--control)"/></marker>
+        <marker id="aN" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="var(--ink-3)"/></marker>
+      </defs>
+
+      <!-- lane tints -->
+      <rect x="232" y="44" width="528" height="120" rx="4" fill="var(--telemetry)" opacity="0.05"/>
+      <rect x="232" y="214" width="528" height="96" rx="4" fill="var(--enforce)" opacity="0.06"/>
+      <rect x="232" y="360" width="528" height="150" rx="4" fill="var(--control)" opacity="0.05"/>
+
+      <!-- boundary -->
+      <line x1="772" y1="24" x2="772" y2="536" stroke="var(--edge-2)" stroke-width="1.5" stroke-dasharray="4 5"/>
+      <text x="772" y="18" text-anchor="middle" font-size="11" fill="var(--ink-3)" letter-spacing="1.5">KERNEL ◀ ┊ ▶ USER</text>
+
+      <!-- event sources -->
+      <text x="30" y="34" font-size="11" fill="var(--ink-3)" letter-spacing="2">OS EVENT SURFACE</text>
+      <g font-size="11.5" fill="var(--ink)">
+        <rect x="30" y="46" width="180" height="34" rx="3" fill="var(--panel-2)" stroke="var(--edge-2)"/>
+        <text x="42" y="62">FS · IRP_MJ_CREATE</text><text x="42" y="74" font-size="9.5" fill="var(--ok)">PASSIVE · FileOpen</text>
+
+        <rect x="30" y="86" width="180" height="34" rx="3" fill="var(--panel-2)" stroke="var(--edge-2)"/>
+        <text x="42" y="102">Ob · handle-create</text><text x="42" y="114" font-size="9.5" fill="var(--ok)">PASSIVE · ProcessOpen</text>
+
+        <rect x="30" y="126" width="180" height="34" rx="3" fill="var(--panel-2)" stroke="var(--edge-2)"/>
+        <text x="42" y="142">Ps · process notify</text><text x="42" y="154" font-size="9.5" fill="var(--ok)">PASSIVE · Create/Exit</text>
+
+        <rect x="30" y="224" width="180" height="34" rx="3" fill="var(--panel-2)" stroke="var(--edge-2)"/>
+        <text x="42" y="240">Ps · thread notify</text><text x="42" y="252" font-size="9.5" fill="var(--enforce)">APC · RemoteThread</text>
+
+        <rect x="30" y="366" width="180" height="34" rx="3" fill="var(--panel-2)" stroke="var(--edge-2)"/>
+        <text x="42" y="382">WFP · classify</text><text x="42" y="394" font-size="9.5" fill="var(--deny)">DISPATCH · (scaffold)</text>
+      </g>
+
+      <!-- TELEMETRY lane -->
+      <text x="244" y="38" font-size="10" fill="var(--telemetry)" letter-spacing="2">TELEMETRY · async</text>
+      <g fill="var(--ink)" font-size="12">
+        <rect x="244" y="92" width="120" height="42" rx="3" fill="var(--panel)" stroke="var(--telemetry)"/>
+        <text x="304" y="110" text-anchor="middle">Queue</text><text x="304" y="124" text-anchor="middle" font-size="9" fill="var(--ink-3)">ERESOURCE</text>
+        <rect x="408" y="92" width="132" height="42" rx="3" fill="var(--panel)" stroke="var(--telemetry)"/>
+        <text x="474" y="110" text-anchor="middle">Worker thread</text><text x="474" y="124" text-anchor="middle" font-size="9" fill="var(--ink-3)">PASSIVE · serialize</text>
+        <rect x="584" y="92" width="150" height="42" rx="3" fill="var(--panel)" stroke="var(--telemetry)"/>
+        <text x="659" y="110" text-anchor="middle">Connection::Send</text><text x="659" y="124" text-anchor="middle" font-size="9" fill="var(--ink-3)">no reply · 5s</text>
+      </g>
+      <g stroke="var(--telemetry)" stroke-width="1.6" fill="none" marker-end="url(#aT)">
+        <path d="M210 96 C 226 100, 228 112, 242 113"/>
+        <path d="M210 136 C 228 130, 230 118, 242 116"/>
+        <path d="M364 113 H 406"/>
+        <path d="M540 113 H 582"/>
+        <path d="M734 113 H 856"/>
+      </g>
+
+      <!-- ENFORCEMENT lane -->
+      <text x="244" y="208" font-size="10" fill="var(--enforce)" letter-spacing="2">ENFORCEMENT · sync</text>
+      <g fill="var(--ink)" font-size="12">
+        <rect x="408" y="240" width="132" height="42" rx="3" fill="var(--panel)" stroke="var(--enforce)"/>
+        <text x="474" y="258" text-anchor="middle">EnforceSync</text><text x="474" y="272" text-anchor="middle" font-size="9" fill="var(--ink-3)">Worker</text>
+        <rect x="584" y="240" width="150" height="42" rx="3" fill="var(--panel)" stroke="var(--enforce)"/>
+        <text x="659" y="255" text-anchor="middle">SendWithReply</text><text x="659" y="272" text-anchor="middle" font-size="9" fill="var(--ink-3)">reply · 20ms</text>
+      </g>
+      <g stroke="var(--enforce)" stroke-width="1.6" fill="none" marker-end="url(#aE)">
+        <path d="M210 100 C 300 150, 320 250, 406 258"/>
+        <path d="M540 261 H 582"/>
+        <path d="M734 255 H 856"/>
+      </g>
+      <!-- verdict return -->
+      <g stroke="var(--enforce)" stroke-width="1.4" fill="none" stroke-dasharray="5 4" marker-end="url(#aE)">
+        <path d="M856 278 H 736 C 700 278, 700 300, 540 300 L 476 300 V 284"/>
+      </g>
+      <text x="612" y="314" font-size="9.5" fill="var(--enforce)">verdict ← deny/allow → strip access · ACCESS_DENIED</text>
+
+      <!-- PORT + service -->
+      <rect x="740" y="70" width="64" height="220" rx="3" fill="var(--panel-2)" stroke="var(--edge-2)"/>
+      <text x="772" y="184" text-anchor="middle" font-size="11" fill="var(--ink-2)" transform="rotate(-90 772 184)">\SnsDrvPort</text>
+
+      <rect x="856" y="70" width="118" height="212" rx="3" fill="var(--panel)" stroke="var(--edge-2)"/>
+      <text x="915" y="150" text-anchor="middle" font-size="13" fill="var(--ink)">edr-service</text>
+      <text x="915" y="168" text-anchor="middle" font-size="10" fill="var(--ink-3)">engine · Rust</text>
+      <text x="915" y="186" text-anchor="middle" font-size="10" fill="var(--ink-3)">storyline · verdict</text>
+
+      <!-- CONTROL lane -->
+      <text x="244" y="354" font-size="10" fill="var(--control)" letter-spacing="2">CONTROL · service → kernel</text>
+      <g fill="var(--ink)" font-size="12">
+        <rect x="244" y="392" width="132" height="46" rx="3" fill="var(--panel)" stroke="var(--control)"/>
+        <text x="310" y="411" text-anchor="middle">ArmTable</text><text x="310" y="426" text-anchor="middle" font-size="9" fill="var(--ink-3)">(pid,start,op)</text>
+        <rect x="470" y="392" width="180" height="46" rx="3" fill="var(--panel)" stroke="var(--control)"/>
+        <text x="560" y="411" text-anchor="middle">ControlMessageNotify</text><text x="560" y="426" text-anchor="middle" font-size="9" fill="var(--ink-3)">ARM · DISARM · SetSelf</text>
+      </g>
+      <g stroke="var(--control)" stroke-width="1.6" fill="none" marker-end="url(#aC)">
+        <path d="M856 250 C 800 340, 760 415, 652 415"/>
+        <path d="M470 415 H 378"/>
+      </g>
+      <!-- arm feedback into routing -->
+      <g stroke="var(--control)" stroke-width="1.3" fill="none" stroke-dasharray="4 4" marker-end="url(#aC)">
+        <path d="M300 392 C 292 300, 250 210, 212 240"/>
+      </g>
+      <text x="150" y="300" font-size="9.5" fill="var(--control)" transform="rotate(-90 150 300)">routes armed (pid,op) → sync</text>
+    </svg>
+  </div>
+  <div class="legend">
+    <span class="lg-t"><i></i>Telemetry (async)</span>
+    <span class="lg-e"><i></i>Enforcement (sync + verdict)</span>
+    <span class="lg-c"><i></i>Control (arm pushdown)</span>
+  </div>
+  <p class="cap">The queue is not batching — it is the IRQL bridge. FltSendMessage requires PASSIVE_LEVEL; thread-notify runs at APC and WFP at DISPATCH, so those callbacks must hand off to the PASSIVE worker thread. Enforcement, only ever raised from PASSIVE callbacks, sends directly.</p>
+</div></section>
+
+<!-- 03 SOURCES / IRQL -->
+<section id="sources"><div class="wrap">
+  <div class="sechead"><span class="num">03</span><div>
+    <span class="ey">Instrumentation</span><h2>Event sources &amp; IRQL</h2>
+  </div></div>
+  <p>Each OS callback surface produces one event type at a fixed IRQL. The IRQL decides the send path; whether an event is <em>enforceable</em> decides if it can be blocked at all.</p>
+  <div class="tablewrap"><table>
+    <thead><tr><th>Callback</th><th>Trigger</th><th>IRQL</th><th>Event · type</th><th>Send</th><th>Enforce</th></tr></thead>
+    <tbody>
+      <tr><td class="mono">FilterOperation_Pre_Create</td><td>IRP_MJ_CREATE</td><td><span class="irql passive">PASSIVE</span></td><td class="mono">FileOpen · 1</td><td><span class="pill async">async</span></td><td><span class="pill no">telemetry</span></td></tr>
+      <tr><td class="mono">ObPre_ProcessHandleCreation</td><td>handle → process</td><td><span class="irql passive">PASSIVE</span></td><td class="mono">ProcessOpen · 102</td><td><span class="pill sync">sync*</span></td><td><span class="pill sync">strip access</span></td></tr>
+      <tr><td class="mono">CreateProcessNotify</td><td>process spawn</td><td><span class="irql passive">PASSIVE</span></td><td class="mono">ProcessCreate · 100</td><td><span class="pill sync">sync†</span></td><td><span class="pill sync">ACCESS_DENIED</span></td></tr>
+      <tr><td class="mono">CreateProcessNotify</td><td>process exit</td><td><span class="irql passive">PASSIVE</span></td><td class="mono">ProcessExit · 101</td><td><span class="pill async">async</span></td><td><span class="pill no">state only</span></td></tr>
+      <tr><td class="mono">CreateThreadNotify</td><td>remote thread</td><td><span class="irql apc">APC</span></td><td class="mono">RemoteThreadCreate · 104</td><td><span class="pill async">async</span></td><td><span class="pill no">notify-only</span></td></tr>
+      <tr><td class="mono">ClassifyCallback</td><td>WFP connect v4</td><td><span class="irql dispatch">DISPATCH</span></td><td class="mono">— (scaffold)</td><td><span class="pill no">—</span></td><td><span class="pill no">—</span></td></tr>
+    </tbody>
+  </table></div>
+  <p class="cap">*&nbsp;lsass opens are the static single-step chokepoint — always sent sync.&nbsp;&nbsp;†&nbsp;a spawn is sent sync only when the parent identity is armed. Everything else is async telemetry. RemoteThreadCreate cannot block: Windows thread-notify is notify-only.</p>
+</div></section>
+
+<!-- 04 COMPONENTS -->
+<section id="components"><div class="wrap">
+  <div class="sechead"><span class="num">04</span><div>
+    <span class="ey">Reference</span><h2>Components</h2>
+  </div></div>
+  <div class="comps">
+    <div class="comp">
+      <span class="fn">Entry.cpp</span>
+      <h3>Driver <span class="k">owner</span></h3>
+      <p><code>DriverEntry</code> builds the <code>Driver</code> object that owns and wires every subsystem, exposes globals for the callbacks, and tears down in reverse.</p>
+      <ul><li>Enforcement thunk <b>callback → Worker::EnforceSync</b></li><li>Strict init / cleanup ordering (see §07)</li></ul>
+    </div>
+    <div class="comp">
+      <span class="fn">MiniFilter.cpp</span>
+      <h3>Filter · Port · Connection <span class="k k-t">telemetry</span></h3>
+      <p>Registers the minifilter (IRP_MJ_CREATE → FileOpen), owns the comms port, and wraps the client connection.</p>
+      <ul><li><b>Send</b> — fire-and-forget telemetry</li><li><b>SendWithReply</b> — sync verdict, 20&nbsp;ms</li><li><b>ControlMessageNotify</b> — arm pushdown sink</li></ul>
+    </div>
+    <div class="comp">
+      <span class="fn">ProcessMonitor.cpp</span>
+      <h3>Process monitor <span class="k k-e">enforce</span></h3>
+      <p>ObCallbacks + process/thread notify routines. The enforcement decisions live here.</p>
+      <ul><li>lsass handle-open → <b>strip sensitive access</b></li><li>armed spawn → <b>STATUS_ACCESS_DENIED</b></li><li>exempts the service pid (self-deadlock guard)</li></ul>
+    </div>
+    <div class="comp">
+      <span class="fn">Worker.cpp</span>
+      <h3>Queue · Worker <span class="k k-t">bridge</span></h3>
+      <p>System thread that drains the queue and sends each event immediately (no batching), and publishes the live connection for the enforcement path.</p>
+      <ul><li>IRQL bridge for APC / DISPATCH callbacks</li><li>Publishes connection under a lock, unpublished before teardown</li></ul>
+    </div>
+    <div class="comp">
+      <span class="fn">ArmTable.cpp</span>
+      <h3>Arm table <span class="k k-c">control</span></h3>
+      <p>Small lock-guarded set of armed identities. Consulted on the hot path; updated by the control channel.</p>
+      <ul><li>Key <b>(pid, start_ms, op)</b> · shared-lock lookup</li><li><b>IsArmed / Arm / Disarm / SetServicePid</b></li></ul>
+    </div>
+    <div class="comp">
+      <span class="fn">Network.cpp</span>
+      <h3>WFP monitor <span class="k">scaffold</span></h3>
+      <p>Registers WFP callouts and extracts IP / port / pid, but does not yet emit events. Kept as scaffolding for future network telemetry (engine already has <code>Op::Connect</code>).</p>
+    </div>
+  </div>
+</div></section>
+
+<!-- 05 WIRE FORMAT -->
+<section id="wire"><div class="wrap">
+  <div class="sechead"><span class="num">05</span><div>
+    <span class="ey">Protocol</span><h2>Wire format v2</h2>
+  </div></div>
+  <p>Records are engine-ready: numeric fields sit at fixed, naturally-aligned offsets, every record carries the full process identity <code>(pid, create_time)</code> inline, and each record is size-prefixed and padded to 8 bytes so the service reads fields directly with no cursor parse and can skip unknown types.</p>
+
+  <h3 style="margin-top:1.6em">Record header · 32 bytes</h3>
+  <div class="stripwrap"><div class="strip">
+    <div class="cell c-meta" style="flex:4"><span class="off">+0</span><span class="nm">Size</span><span class="sz">u32</span></div>
+    <div class="cell c-meta" style="flex:1"><span class="off">+4</span><span class="nm">Type</span><span class="sz">u8</span></div>
+    <div class="cell c-pad" style="flex:3"><span class="off">+5</span><span class="nm">pad</span><span class="sz">3</span></div>
+    <div class="cell c-time" style="flex:8"><span class="off">+8</span><span class="nm">TimeStamp</span><span class="sz">i64 · FILETIME</span></div>
+    <div class="cell c-id" style="flex:4"><span class="off">+16</span><span class="nm">Pid</span><span class="sz">u32</span></div>
+    <div class="cell c-pad" style="flex:4"><span class="off">+20</span><span class="nm">pad</span><span class="sz">4</span></div>
+    <div class="cell c-id" style="flex:8"><span class="off">+24</span><span class="nm">PidCreateTime</span><span class="sz">i64 · identity</span></div>
+  </div></div>
+  <p class="cap"><span style="color:var(--enforce)">▮</span> identity &nbsp; <span style="color:var(--telemetry)">▮</span> time &nbsp; then a fixed per-type body, length-prefixed UTF-16LE strings, and padding to the next 8-byte boundary.</p>
+
+  <div style="height:20px"></div>
+  <div class="tablewrap"><table>
+    <thead><tr><th>Frame / record</th><th>Layout</th></tr></thead>
+    <tbody>
+      <tr><td class="mono">Frame</td><td class="mono">TotalSize:u32 · Version:u16=2 · Count:u16 <span style="color:var(--enforce)">(bit15 = REPLY_EXPECTED)</span> · records…</td></tr>
+      <tr><td class="mono">ProcessCreate · 100</td><td class="mono">ChildPid:u32 · pad · ChildCreateTime:i64 · Image · CommandLine <span style="color:var(--ink-3)">(hdr = parent)</span></td></tr>
+      <tr><td class="mono">ProcessOpen · 102</td><td class="mono">TargetPid:u32 · DesiredAccess:u32 · TargetCreateTime:i64 · TargetImage</td></tr>
+      <tr><td class="mono">RemoteThreadCreate · 104</td><td class="mono">TargetPid:u32 · ThreadId:u32 · TargetCreateTime:i64</td></tr>
+      <tr><td class="mono">FileOpen · 1</td><td class="mono">FileName <span style="color:var(--ink-3)">(string only)</span></td></tr>
+      <tr><td class="mono">String</td><td class="mono">Length:u16 (bytes) · UTF-16LE data</td></tr>
+      <tr><td class="mono">Control record · 16 B</td><td class="mono">Kind:u8 (1=Arm 2=Disarm 3=SetSelf) · Op:u8 · pad · Pid:u32 · PidStartMs:u64</td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="note">
+    <span class="t">Identity</span>
+    <p><code>start_ms = FILETIME / 10000</code> — the same engine milliseconds the service uses. The driver matches an arm by <code>pid</code> plus its own creation FILETIME truncated to ms, so a reused pid never inherits a stale arm (collision only within the same millisecond).</p>
+  </div>
+</div></section>
+
+<!-- 06 ARM vs BLOCK -->
+<section id="armblock"><div class="wrap">
+  <div class="sechead"><span class="num">06</span><div>
+    <span class="ey">Mechanism</span><h2>Arm vs. block</h2>
+  </div></div>
+  <p>Two different things at two different moments. Arm is preparation; block is the act. Arm exists so that, when the awaited operation finally arrives, the block decision can be made synchronously and in time to stop it.</p>
+  <div class="compare">
+    <div class="avb arm">
+      <div class="h">◇ ARM</div>
+      <p>“Next time <em>this</em> process does <em>this</em> op, be ready to intercept.” Pushed down before the dangerous action, it re-routes a future event onto the sync path. Blocks nothing by itself.</p>
+      <dl>
+        <dt>when</dt><dd>score ≥ θ_block, chokepoint not yet reached</dd>
+        <dt>state</dt><dd>ArmTable entry (pid, start, op)</dd>
+        <dt>effect</dt><dd>routing: async → sync enforcement</dd>
+      </dl>
+    </div>
+    <div class="avb block">
+      <div class="h">■ BLOCK</div>
+      <p>The decision to deny an operation happening <em>right now</em>. At the driver it becomes a concrete action: strip the handle's access bits, or fail the process creation.</p>
+      <dl>
+        <dt>when</dt><dd>the armed event arrives · at the chokepoint</dd>
+        <dt>state</dt><dd>verdict = Deny</dd>
+        <dt>effect</dt><dd>strip access · STATUS_ACCESS_DENIED</dd>
+      </dl>
+    </div>
+  </div>
+  <div class="timeline">
+    <div class="step dim">// ransomware storyline</div>
+    <div class="step">exec powershell <span class="dim">→</span> inhibit recovery <span class="dim">→</span> [score &gt; θ_block] &nbsp;<span class="arm">◇ ARM (pid, write)</span></div>
+    <div class="step dim">&nbsp;&nbsp;… await …</div>
+    <div class="step">first encrypting write arrives <span class="dim">→</span> armed <span class="dim">→</span> sync send <span class="dim">→</span> <span class="blk">■ BLOCK — deny the write</span></div>
+  </div>
+  <p class="cap">Single-step chokepoints — like the lsass read — cannot be pre-armed: the first matching event both crosses the threshold and <em>is</em> the chokepoint, so it blocks directly via the static predicate. Arming only helps multi-step patterns.</p>
+</div></section>
+
+<!-- 07 LIFECYCLE -->
+<section id="lifecycle"><div class="wrap">
+  <div class="sechead"><span class="num">07</span><div>
+    <span class="ey">Ownership</span><h2>Lifecycle</h2>
+  </div></div>
+  <p>The <code>Driver</code> object constructs subsystems in dependency order and tears them down so that nothing referencing the arm table or the connection outlives it.</p>
+  <div class="life">
+    <div class="col">
+      <span class="ey" style="color:var(--ok)">Construct →</span>
+      <ol>
+        <li><b>ArmTable</b> <span class="cm">must outlive all consumers</span></li>
+        <li><b>Queue</b> <span class="cm">event staging</span></li>
+        <li><b>Worker</b> <span class="cm">+ arm table ref</span></li>
+        <li><b>MiniFilter::Filter</b> <span class="cm">start filtering</span></li>
+        <li><b>Port</b> <span class="cm">\SnsDrvPort + control sink</span></li>
+        <li><b>ProcessMonitor</b> <span class="cm">arms + enforce thunk</span></li>
+        <li><b>Network</b> <span class="cm">WFP callouts</span></li>
+      </ol>
+    </div>
+    <div class="col">
+      <span class="ey" style="color:var(--deny)">← Destruct</span>
+      <ol>
+        <li><b>Port</b> <span class="cm">stop new connections + control</span></li>
+        <li><b>ProcessMonitor</b> <span class="cm">stop enforcing callbacks</span></li>
+        <li><b>Network</b> <span class="cm">unregister callouts</span></li>
+        <li><b>Worker</b> <span class="cm">stop thread, drop connection</span></li>
+        <li><b>Filter</b> <span class="cm">stop new events</span></li>
+        <li><b>Queue</b> <span class="cm">drain</span></li>
+        <li><b>ArmTable</b> <span class="cm">last — no referrers remain</span></li>
+      </ol>
+    </div>
+  </div>
+</div></section>
+
+</main>
+
+<footer><div class="wrap">
+  <span>SnsDrv · kernel sensor · design spec</span>
+  <span>compiles + links → SnsDrv.sys · runtime still needs a load test on a Windows target</span>
+</div></footer>
+
+<script>
+  // keep the topbar status dot honest to the doc's build state; nothing dynamic needed.
+</script>

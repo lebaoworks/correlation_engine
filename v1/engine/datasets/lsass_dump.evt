@@ -1,0 +1,5 @@
+# mimikatz-style: một tiến trình mở LSASS với quyền đọc bộ nhớ và đọc.
+# Kỳ vọng: DENY ngay tại event đọc (single-event chokepoint), nhờ mẫu nạp từ
+# rules/lsass_dump.rules — engine không phải build lại.
+ts=1000 op=exec actor=100.1 object=proc:800.2 image=C:\Tools\mimikatz.exe cmd="sekurlsa::logonpasswords"
+ts=1200 op=read actor=800.2 object=proc:50.1 target_image=C:\Windows\System32\lsass.exe vm_read=1

@@ -1,0 +1,5 @@
+# LSASS credential-dump pattern for the service.
+# The T1003 ttp + tagger are already declared in builtin.rules; here we add ONLY
+# the correlation pattern (single enforceable chokepoint) so nothing is duplicated.
+pattern lsass_credential_dump scope=same_storyline theta_alert=4 theta_block=6 root_gate=always
+  step T1003_lsass_read bit=0 match=ttp:T1003 seg_window=120000 enforceable block

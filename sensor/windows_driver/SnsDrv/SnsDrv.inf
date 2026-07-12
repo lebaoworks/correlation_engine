@@ -1,0 +1,98 @@
+;
+; SnsDrv.inf
+;
+
+;https://learn.microsoft.com/en-us/windows-hardware/drivers/ifs/file-system-filter-driver-classes-and-class-guids
+[Version]
+Signature   = "$Windows NT$"
+Class       = "ActivityMonitor"
+ClassGuid   = {b86dff51-a31e-4bac-b3cf-e8cfe75c9fc2}
+Provider    = %ProviderString%
+DriverVer   = 06/01/2023,1.0.0.0
+CatalogFile = SnsDrv.cat
+PnpLockDown = 1
+
+[DestinationDirs]
+DefaultDestDir     = 12
+SnsDrv.DriverFiles  = 12            ;%windir%\system32\drivers
+SnsDrv.DriverFiles2 = 12
+
+;;
+;; Default install sections
+;;
+
+[DefaultInstall.NTamd64]
+OptionDesc          = %ServiceDescription%
+CopyFiles           = SnsDrv.DriverFiles
+
+[DefaultInstall.NTamd64.Services]
+AddService          = %ServiceName%,,SnsDrv.Service
+
+;;
+;; Default uninstall sections
+;;
+
+[DefaultUninstall.NTamd64]
+DelFiles   = SnsDrv.DriverFiles2
+LegacyUninstall = 1
+
+[DefaultUninstall.NTamd64.Services]
+DelService = %ServiceName%,0x200      ;Ensure service is stopped before deleting
+
+;
+; Services Section
+;
+
+[SnsDrv.Service]
+DisplayName      = %ServiceName%
+Description      = %ServiceDescription%
+ServiceBinary    = %12%\%DriverName%.sys        ;%windir%\system32\drivers\
+Dependencies     = FltMgr
+ServiceType      = 2                            ;SERVICE_FILE_SYSTEM_DRIVER
+StartType        = 3                            ;SERVICE_DEMAND_START
+ErrorControl     = 1                            ;SERVICE_ERROR_NORMAL
+LoadOrderGroup   = "FSFilter Activity Monitor"
+AddReg           = SnsDrv.AddRegistry
+
+;
+; Registry Modifications
+;
+
+[SnsDrv.AddRegistry]
+HKR,"Parameters\Instances","DefaultInstance",0x00000000,%DefaultInstance%
+HKR,"Parameters\Instances\"%Instance1.Name%,"Altitude",0x00000000,%Instance1.Altitude%
+HKR,"Parameters\Instances\"%Instance1.Name%,"Flags",0x00010001,%Instance1.Flags%
+
+
+;
+; Copy Files
+;
+
+[SnsDrv.DriverFiles]
+%DriverName%.sys
+
+[SnsDrv.DriverFiles2]
+%DriverName%.sys
+
+[SourceDisksFiles]
+SnsDrv.sys = 1,,
+
+[SourceDisksNames]
+1 = %DiskId1%,,,
+
+;;
+;; String Section
+;;
+
+[Strings]
+ProviderString          = "lebaoworks@gmail.com"
+ServiceDescription      = "Monitoring Mini-Filter Driver"
+ServiceName             = "SnsDrv"
+DriverName              = "SnsDrv"
+DiskId1                 = "Monitoring Device Installation Disk"
+
+;Instances specific information.
+DefaultInstance         = "SnsDrv Instance"
+Instance1.Name          = "SnsDrv Instance"
+Instance1.Altitude      = "370160"
+Instance1.Flags         = 0x0              ; Allow all attachments

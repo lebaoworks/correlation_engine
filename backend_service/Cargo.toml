@@ -1,0 +1,20 @@
+[package]
+name = "edr-backend-service"
+version = "0.1.0"
+edition = "2021"
+description = "EDR backend service: ingests events shipped by the endpoint service, keeps the full provenance graph, and renders the whole storyline when a block alert arrives"
+
+# Loads the detection engine's backend half as a library and the wire contract
+# (proto/wire.proto). No other external dependencies; transport is std::net TCP.
+[dependencies]
+edr-engine = { path = "../engine" }
+edr-proto = { path = "../proto" }
+
+[lib]
+name = "edr_backend_service"
+path = "src/lib.rs"
+
+[[bin]]
+name = "edr-backend-service"
+path = "src/main.rs"
+

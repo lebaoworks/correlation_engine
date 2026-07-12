@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Engine — Đồ thị · Automaton · Event (bước qua từng event)</title>
+<style>
+  :root{
+    --bg:#0a0e14; --bg2:#0e131c; --panel:#141b26; --panel2:#1a2331;
+    --line:#25303f; --line2:#324054;
+    --ink:#e9eef5; --muted:#8b9aad; --dim:#5c6b7e;
+    --accent:#8b7cff; --cyan:#38bdf8;
+    --allow:#34d399; --arm:#fbbf24; --deny:#fb6f84;
+    --s1:#8b7cff; --s2:#38bdf8;
+    --mono: ui-monospace,"Cascadia Code","JetBrains Mono","SFMono-Regular",Consolas,monospace;
+    --sans: system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{margin:0;background:
+      radial-gradient(1100px 700px at 82% -10%, #1622300f 0%, transparent 55%),
+      var(--bg);
+    color:var(--ink);font-family:var(--sans);
+    display:flex;align-items:center;justify-content:center;overflow:hidden;-webkit-font-smoothing:antialiased;}
+
+  .stage{position:relative;width:min(96vw, calc(92vh*16/9));aspect-ratio:16/9;
+    container-type:inline-size;
+    background:linear-gradient(180deg,var(--bg2),var(--panel) 140%);
+    border:1px solid var(--line);border-radius:1.1cqi;overflow:hidden;
+    box-shadow:0 3cqi 8cqi -3cqi #000, inset 0 0 0 1px #ffffff06;
+    display:grid;grid-template-columns:29% 71%;
+    grid-template-rows:4.8cqi 1fr auto auto 4.2cqi;
+    grid-template-areas:"top top" "table graph" "table autos" "table note" "table rail";}
+
+  .top{grid-area:top;display:flex;align-items:center;justify-content:space-between;padding:0 2cqi;border-bottom:1px solid var(--line);gap:1cqi}
+  .brand{font-family:var(--mono);font-size:1.15cqi;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);display:flex;gap:.8cqi;align-items:center;white-space:nowrap}
+  .brand .d{width:.85cqi;height:.85cqi;border-radius:50%;background:var(--accent);box-shadow:0 0 1.4cqi var(--accent);flex:none}
+  .legend{display:flex;gap:1.2cqi;font-family:var(--mono);font-size:1.05cqi;color:var(--muted);align-items:center;white-space:nowrap}
+  .legend i{width:1.8cqi;height:0;border-top:2px solid;display:inline-block;margin-right:.4cqi;vertical-align:middle}
+  .legend .tc{border-top-style:dashed;border-color:var(--dim)}
+  .sw{width:1cqi;height:1cqi;border-radius:50%;display:inline-block;margin-right:.35cqi;vertical-align:middle}
+
+  /* ---- LEFT: event table ---- */
+  .table{grid-area:table;border-right:1px solid var(--line);padding:1.2cqi 1.2cqi;display:flex;flex-direction:column;gap:.75cqi;overflow:hidden}
+  .table h3{font-family:var(--mono);font-size:1.1cqi;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);margin:0 0 .2cqi}
+  .erow{border:1px solid var(--line);border-radius:.7cqi;padding:.7cqi .85cqi;background:var(--panel);opacity:.32;filter:saturate(.4);transition:.4s;display:flex;flex-direction:column;gap:.28cqi}
+  .erow.on{opacity:1;filter:none}
+  .erow.cur{border-color:var(--accent);box-shadow:0 0 2.4cqi -1cqi var(--accent);background:#8b7cff10}
+  .erow .l1{display:flex;justify-content:space-between;align-items:center;font-family:var(--mono);font-size:1.05cqi;color:var(--dim)}
+  .erow .op{font-family:var(--mono);font-size:1.35cqi;font-weight:600;line-height:1.05}
+  .op.causal{color:var(--accent)} .op.touch{color:var(--dim)}
+  .erow .flow{font-family:var(--mono);font-size:1.15cqi;color:var(--muted)}
+  .erow .tag{font-family:var(--mono);font-size:1.02cqi;align-self:flex-start;padding:.12cqi .7cqi;border-radius:.45cqi;border:1px solid var(--line2);color:var(--dim)}
+  .erow.on .tag.hit{color:var(--allow);border-color:#34d39955;background:#34d39912}
+
+  /* ---- RIGHT-TOP: graph ---- */
+  .graph{grid-area:graph;position:relative;margin:1cqi 1.4cqi .4cqi;border:1px solid var(--line);border-radius:.9cqi;
+    background:radial-gradient(circle at 50% 40%, #ffffff06, transparent 70%), var(--bg2);overflow:hidden}
+  .glabel{position:absolute;top:.9cqi;left:1.2cqi;font-family:var(--mono);font-size:1.05cqi;letter-spacing:.1em;text-transform:uppercase;color:var(--dim);z-index:3}
+  .edges{position:absolute;inset:0;width:100%;height:100%}
+  .gedge{stroke:var(--line2);stroke-width:2;opacity:0;transition:opacity .5s ease}
+  .gedge.on{opacity:1}
+  .gedge.s1{stroke:var(--s1)} .gedge.s2{stroke:var(--s2)}
+  .gedge.touch{stroke:var(--dim);stroke-dasharray:4 4}
+  .gnode{position:absolute;transform:translate(-50%,-50%) scale(.4);opacity:0;transition:.5s cubic-bezier(.34,1.4,.64,1);
+    width:8.8cqi;height:8.8cqi;border-radius:50%;border:2px solid var(--line2);background:var(--panel);
+    display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.15cqi;font-family:var(--mono);z-index:2;text-align:center;padding:.3cqi}
+  .gnode.on{opacity:1;transform:translate(-50%,-50%) scale(1)}
+  .gnode .k{font-size:1.2cqi;font-weight:700;color:var(--ink);line-height:1}
+  .gnode .k2{font-size:.92cqi;color:var(--dim)}
+  .gnode.s1{border-color:var(--s1);background:#8b7cff18;box-shadow:0 0 3cqi -1cqi var(--s1)}
+  .gnode.s1 .k2{color:var(--s1)}
+  .gnode.s2{border-color:var(--s2);background:#38bdf818;box-shadow:0 0 3cqi -1cqi var(--s2)}
+  .gnode.s2 .k2{color:var(--s2)}
+  .gnode.touch{border-style:dashed;border-color:var(--dim)}
+  .gnode.touch .k2{color:var(--dim)}
+
+  /* ---- RIGHT-MID: automaton ---- */
+  .autos{grid-area:autos;margin:.2cqi 1.4cqi 0;display:flex;flex-direction:column;gap:.7cqi}
+  .autohd{display:flex;justify-content:space-between;align-items:center;gap:1cqi}
+  .autohd .t{font-family:var(--mono);font-size:1.1cqi;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .state{font-family:var(--mono);font-size:1.2cqi;font-weight:700;letter-spacing:.05em;padding:.25cqi 1cqi;border-radius:.5cqi;border:1px solid var(--line2);color:var(--dim);flex:none}
+  .state.seeded{color:var(--accent);border-color:#8b7cff55;background:#8b7cff12}
+  .state.alert{color:var(--arm);border-color:#fbbf2455;background:#fbbf2412}
+  .state.armed{color:var(--arm);border-color:#fbbf2588;background:#fbbf2420}
+  .state.blocked{color:var(--deny);border-color:#fb6f8488;background:#fb6f8420}
+  .amrow{display:flex;gap:.8cqi;align-items:stretch}
+  .abit{flex:1;border:1.5px solid var(--line2);border-radius:.7cqi;background:var(--panel);padding:.6cqi .7cqi;display:flex;align-items:center;gap:.7cqi;transition:.4s;min-width:0}
+  .abit .box{width:2.1cqi;height:2.1cqi;border-radius:.5cqi;border:1.5px solid var(--line2);display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:1.25cqi;color:var(--dim);flex:none;transition:.4s}
+  .abit .m{min-width:0}
+  .abit .m .tt{font-family:var(--mono);font-size:1.2cqi;color:var(--ink);font-weight:600;display:block;line-height:1.1;white-space:nowrap}
+  .abit .m .pr{font-family:var(--mono);font-size:.92cqi;color:var(--dim);white-space:nowrap}
+  .abit.set{border-color:var(--allow);background:#34d3990e}
+  .abit.set .box{border-color:var(--allow);background:var(--allow);color:#06281c}
+  .abit.set .pr{color:var(--allow)}
+  .abit.blockstep.set{box-shadow:0 0 0 2px var(--deny)}
+  .amfoot{display:flex;align-items:center;gap:1cqi;margin-top:.1cqi}
+  .mask{font-family:var(--mono);font-size:1.2cqi;color:var(--muted);white-space:nowrap}
+  .mask b{color:var(--ink)}
+  .bar{flex:1;height:1.3cqi;border-radius:1cqi;background:var(--panel2);border:1px solid var(--line);position:relative;overflow:visible}
+  .bar .fill{height:100%;width:0;border-radius:1cqi;background:linear-gradient(90deg,var(--accent),var(--cyan));transition:width .6s cubic-bezier(.4,0,.2,1)}
+  .bar .fill.warn{background:linear-gradient(90deg,var(--arm),#f59e0b)}
+  .bar .fill.crit{background:linear-gradient(90deg,var(--deny),var(--arm))}
+  .bar .tick{position:absolute;top:-.5cqi;bottom:-.5cqi;width:1.5px}
+  .bar .tick.a{left:30%;background:var(--arm)} .bar .tick.b{left:55%;background:var(--deny)}
+  .scoreN{font-family:var(--mono);font-size:1.2cqi;color:var(--ink);min-width:5cqi;text-align:right}
+
+  /* ---- RIGHT: narration band (own row so it never overflows the rail) ---- */
+  .note{grid-area:note;margin:.6cqi 1.4cqi .2cqi;font-family:var(--mono);font-size:1.12cqi;line-height:1.4;color:var(--muted);
+    border-top:1px solid var(--line);padding-top:.7cqi;min-height:5.6cqi}
+  .note b{color:var(--ink)} .note .g{color:var(--allow)} .note .y{color:var(--arm)} .note .r{color:var(--deny)} .note .c{color:var(--s2)} .note .p{color:var(--accent)}
+  .s2tag{color:var(--s2);opacity:.9}
+
+  /* ---- rail (controls only) ---- */
+  .rail{grid-area:rail;border-top:1px solid var(--line);display:flex;align-items:center;justify-content:flex-end;padding:0 1.4cqi;gap:.7cqi}
+  .nav{display:flex;gap:.6cqi;align-items:center}
+  .nav button{all:unset;cursor:pointer;font-family:var(--mono);font-size:1.25cqi;color:var(--muted);border:1px solid var(--line2);border-radius:.6cqi;padding:.35cqi 1.1cqi;transition:.2s;outline-offset:2px;white-space:nowrap}
+  .nav button:hover{color:var(--ink);border-color:var(--accent);background:#8b7cff14}
+  .nav button:focus-visible{outline:2px solid var(--accent)}
+  .nav .cnt{font-family:var(--mono);font-size:1.15cqi;color:var(--dim);padding:0 .5cqi}
+
+  @media (prefers-reduced-motion: reduce){*{transition-duration:.12s !important}}
+</style>
+</head>
+<body>
+  <div class="stage" id="stage" tabindex="0">
+    <div class="top">
+      <div class="brand"><span class="d"></span> Đồ thị · Automaton · Event</div>
+      <div class="legend">
+        <span><span class="sw" style="background:var(--s1)"></span>storyline S1</span>
+        <span><span class="sw" style="background:var(--s2)"></span>S2 (riêng)</span>
+        <span><i class="tc"></i>touch · không merge</span>
+      </div>
+    </div>
+
+    <!-- LEFT: event table -->
+    <div class="table">
+      <h3>Luồng event</h3>
+      <div class="erow" data-ev="1">
+        <div class="l1"><span>E1 · t=1000</span><span>causal</span></div>
+        <div class="op causal">exec</div>
+        <div class="flow">explorer → powershell</div>
+        <div class="tag hit">⇒ T1059</div>
+      </div>
+      <div class="erow" data-ev="2">
+        <div class="l1"><span>E2 · t=1500</span><span>touch</span></div>
+        <div class="op touch">open</div>
+        <div class="flow">powershell → \Documents</div>
+        <div class="tag hit">⇒ T1083</div>
+      </div>
+      <div class="erow" data-ev="3">
+        <div class="l1"><span>E3 · t=1800</span><span>khác chuỗi</span></div>
+        <div class="op causal">write</div>
+        <div class="flow">backup.exe → log.txt</div>
+        <div class="tag">⇒ (không TTP)</div>
+      </div>
+      <div class="erow" data-ev="4">
+        <div class="l1"><span>E4 · t=2000</span><span>causal</span></div>
+        <div class="op causal">exec</div>
+        <div class="flow">powershell → vssadmin</div>
+        <div class="tag hit">⇒ T1490</div>
+      </div>
+      <div class="erow" data-ev="5">
+        <div class="l1"><span>E5 · t=2500</span><span>causal</span></div>
+        <div class="op causal">write</div>
+        <div class="flow">powershell → doc1 · entropy↑</div>
+        <div class="tag hit">⇒ T1486</div>
+      </div>
+    </div>
+
+    <!-- RIGHT-TOP: graph -->
+    <div class="graph" id="graph">
+      <div class="glabel">Đồ thị storyline</div>
+      <svg class="edges" viewBox="0 0 100 100" preserveAspectRatio="none">
+        <line class="gedge s1"    data-ev="1" x1="18" y1="22" x2="50" y2="34" vector-effect="non-scaling-stroke"/>
+        <line class="gedge touch" data-ev="2" x1="50" y1="34" x2="82" y2="22" vector-effect="non-scaling-stroke"/>
+        <line class="gedge s2"    data-ev="3" x1="17" y1="82" x2="17" y2="58" vector-effect="non-scaling-stroke"/>
+        <line class="gedge s1"    data-ev="4" x1="50" y1="34" x2="47" y2="72" vector-effect="non-scaling-stroke"/>
+        <line class="gedge s1"    data-ev="5" x1="50" y1="34" x2="80" y2="66" vector-effect="non-scaling-stroke"/>
+      </svg>
+      <div class="gnode s1"    data-ev="1" style="left:18%;top:22%"><span class="k">explorer</span><span class="k2">P0 · S1</span></div>
+      <div class="gnode s1"    data-ev="1" style="left:50%;top:34%"><span class="k">powershell</span><span class="k2">P1 · S1</span></div>
+      <div class="gnode touch" data-ev="2" style="left:82%;top:22%"><span class="k">\Documents</span><span class="k2">touch</span></div>
+      <div class="gnode s2"    data-ev="3" style="left:17%;top:82%"><span class="k">backup.exe</span><span class="k2">Z · S2</span></div>
+      <div class="gnode s2"    data-ev="3" style="left:17%;top:58%"><span class="k">log.txt</span><span class="k2">S2</span></div>
+      <div class="gnode s1"    data-ev="4" style="left:47%;top:72%"><span class="k">vssadmin</span><span class="k2">S1</span></div>
+      <div class="gnode s1"    data-ev="5" style="left:80%;top:66%"><span class="k">doc1</span><span class="k2">S1 · file</span></div>
+    </div>
+
+    <!-- RIGHT-MID: automaton -->
+    <div class="autos">
+      <div class="autohd">
+        <span class="t">Automaton A · mẫu ransomware trên S1</span>
+        <span class="state" id="state">IDLE</span>
+      </div>
+      <div class="amrow">
+        <div class="abit" id="ab0"><div class="box">0</div><div class="m"><span class="tt">T1059</span><span class="pr">prereq { }</span></div></div>
+        <div class="abit" id="ab1"><div class="box">1</div><div class="m"><span class="tt">T1490</span><span class="pr">prereq { 0 }</span></div></div>
+        <div class="abit" id="ab2"><div class="box">2</div><div class="m"><span class="tt">T1083</span><span class="pr">prereq { 0 }</span></div></div>
+        <div class="abit blockstep" id="ab3"><div class="box">3</div><div class="m"><span class="tt">T1486 ⛒</span><span class="pr">prereq { 1,2 }</span></div></div>
+      </div>
+      <div class="amfoot">
+        <span class="mask">mask = <b id="maskv">0000</b></span>
+        <div class="bar"><span class="tick a"></span><span class="tick b"></span><span class="fill" id="fill"></span></div>
+        <span class="scoreN" id="scoreN">0.0</span>
+      </div>
+    </div>
+
+    <!-- RIGHT: narration -->
+    <div class="note" id="note">Bấm <b>→</b> để thêm từng event. Đồ thị (trên) và automaton (dưới) đổi theo.</div>
+
+    <!-- rail: controls -->
+    <div class="rail">
+      <div class="nav">
+        <button id="reset" aria-label="Reset">↺</button>
+        <button id="prev" aria-label="Lùi">‹</button>
+        <span class="cnt" id="cnt">0 / 5</span>
+        <button id="next" aria-label="Thêm event">Thêm event ›</button>
+      </div>
+    </div>
+  </div>
+
+<script>
+(() => {
+  const stage = document.getElementById('stage');
+  const TOTAL = 5;
+  let s = 0;
+
+  const BITS  = {0:[0,0,0,0],1:[1,0,0,0],2:[1,0,1,0],3:[1,0,1,0],4:[1,1,1,0],5:[1,1,1,1]};
+  const SCORE = {0:'0.0',1:'4.1',2:'6.9',3:'6.9',4:'12.1',5:'18.8'};
+  const WIDTH = {0:0,1:20,2:34,3:34,4:60,5:94};
+  const STATE = {0:['IDLE',''],1:['SEEDED','seeded'],2:['ALERT','alert'],3:['ALERT','alert'],4:['ARMED','armed'],5:['BLOCKED','blocked']};
+  const NOTE = {
+    0:'Bấm <b>→</b> để thêm từng event. Đồ thị (trên) và automaton (dưới) đổi theo.',
+    1:'E1 <b>exec</b> (nhân-quả): explorer + powershell vào chung <span class="p">storyline S1</span>. T1059 = bước gốc → <b>sinh automaton A</b>, bật <span class="g">bit0</span>.',
+    2:'E2 <b>open</b> (touch): chạm \\Documents nhưng <b>KHÔNG merge</b> (nét đứt, node xám). Actor đã ở S1 nên vẫn Tag T1083 → <span class="g">bit2</span> (đến trước T1490 — nhóm giữa tự do thứ tự).',
+    3:'E3: backup.exe → log.txt = <span class="c">chuỗi riêng S2</span>. Không có TTP gốc → không sinh automaton. <b>A (S1) không bị đụng</b> — đồ thị cô lập phạm vi.',
+    4:'E4 <b>exec</b> vssadmin vào S1. T1490 → <span class="g">bit1</span>. Điểm vượt <span class="r">θ_block</span> nhưng T1486 chưa tới → <span class="y">ARM</span> kernel (chặn write kế tiếp).',
+    5:'E5 <b>write</b> doc1 entropy↑ vào S1. T1486, prereq{1,2} ✓ → <span class="g">bit3</span> → ĐỦ → <span class="r">BLOCK</span> ngay write mã hoá đầu tiên.'
+  };
+
+  function render(){
+    document.querySelectorAll('.erow').forEach(el=>{
+      const e = +el.dataset.ev;
+      el.classList.toggle('on', e<=s);
+      el.classList.toggle('cur', e===s);
+    });
+    document.querySelectorAll('.gnode,.gedge').forEach(el=>{
+      el.classList.toggle('on', +el.dataset.ev <= s);
+    });
+    const b = BITS[s];
+    ['ab0','ab1','ab2','ab3'].forEach((id,i)=>{
+      document.getElementById(id).classList.toggle('set', !!b[i]);
+    });
+    document.getElementById('maskv').textContent = ''+b[3]+b[2]+b[1]+b[0];
+    document.getElementById('scoreN').textContent = SCORE[s];
+    const fill = document.getElementById('fill');
+    fill.style.width = WIDTH[s] + '%';
+    fill.classList.toggle('warn', s===2||s===3);
+    fill.classList.toggle('crit', s>=4);
+    const [txt,cls] = STATE[s];
+    const st = document.getElementById('state');
+    st.textContent = txt; st.className = 'state ' + cls;
+    document.getElementById('note').innerHTML = NOTE[s];
+    document.getElementById('cnt').textContent = s + ' / ' + TOTAL;
+    document.getElementById('prev').disabled = s===0;
+  }
+
+  const next = () => { if(s<TOTAL){s++;render();} };
+  const prev = () => { if(s>0){s--;render();} };
+  document.getElementById('next').addEventListener('click', e=>{e.stopPropagation();next();});
+  document.getElementById('prev').addEventListener('click', e=>{e.stopPropagation();prev();});
+  document.getElementById('reset').addEventListener('click', e=>{e.stopPropagation();s=0;render();});
+  stage.addEventListener('click', e=>{ if(e.target.closest('button')) return; next(); });
+  window.addEventListener('keydown', e=>{
+    if(['ArrowRight',' ','Enter','PageDown'].includes(e.key)){e.preventDefault();next();}
+    else if(['ArrowLeft','PageUp','Backspace'].includes(e.key)){e.preventDefault();prev();}
+    else if(e.key==='Home'){s=0;render();}
+    else if(e.key==='End'){s=TOTAL;render();}
+    else if(e.key.toLowerCase()==='r'){s=0;render();}
+  });
+
+  stage.focus(); render();
+})();
+</script>
+</body>
+</html>

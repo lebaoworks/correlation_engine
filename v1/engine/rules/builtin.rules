@@ -1,0 +1,35 @@
+# ============================================================================
+#  Bộ rule khai báo cho detection core. Nạp lúc chạy — thêm/sửa mẫu KHÔNG cần
+#  build lại engine. Ba loại directive: `ttp` (metadata), `tagger` (raw event ->
+#  TTP), `pattern`+`step` (mẫu tương quan = precedence DAG).
+#  Cú pháp đầy đủ: xem đầu file src/rules.rs.
+# ============================================================================
+
+# ---- TTP metadata (cho scoring §6): tactic / severity 0..10 / rarity 0..1 ----
+ttp T1059 tactic=execution         severity=3 rarity=0.10   # command/script interpreter
+ttp T1083 tactic=discovery         severity=2 rarity=0.10   # file & directory discovery
+ttp T1490 tactic=defense_evasion   severity=7 rarity=0.80   # inhibit system recovery
+ttp T1486 tactic=impact            severity=9 rarity=0.90   # data encrypted for impact
+ttp T1003 tactic=credential_access severity=9 rarity=0.85   # OS credential dumping (LSASS)
+
+# ---- Taggers: mọi cond phải đúng thì mới phát TTP (engine.md §4) -------------
+tagger T1059 op=exec image_base_in=powershell.exe,pwsh.exe,cmd.exe,wscript.exe,cscript.exe,mshta.exe
+tagger T1490 op=exec image_base_in=vssadmin.exe,wbadmin.exe,bcdedit.exe cmd_recovery_inhibit
+tagger T1083 op=open|read attr_true=enum
+tagger T1003 op=read target_image_base=lsass.exe attr_true=vm_read
+tagger T1486 op=write entropy_gt=0.85 write_rate_ge=3 dir_spread_ge=2
+
+# ---- Pattern: dropper "ghi X -> chạy X" -------------------------------------
+# Chứng minh binding theo identity. Tự thân chỉ đạt SUSPECT (installer/updater
+# làm y hệt) — điểm thấp không chạm theta. block_at ở exec_dropped.
+pattern dropper_write_then_exec scope=same_storyline theta_alert=6 theta_block=12 root_gate=pe_write
+  step write_executable bit=0 match=op:write prereq=  seg_window=300000               bind=dropped:object
+  step exec_dropped     bit=1 match=op:exec  prereq=0 seg_window=300000 enforceable   bind=dropped:image block
+
+# ---- Pattern: ransomware nhanh ----------------------------------------------
+# T1059 -> {T1490, T1083} (nhóm giữa tự do thứ tự) -> T1486. block_at = T1486.
+pattern ransomware_fast_encrypt scope=same_storyline theta_alert=6 theta_block=12 root_gate=always
+  step T1059_exec_interpreter bit=0 match=ttp:T1059 prereq=    seg_window=120000
+  step T1490_inhibit_recovery bit=1 match=ttp:T1490 prereq=0   seg_window=120000 enforceable
+  step T1083_file_discovery   bit=2 match=ttp:T1083 prereq=0   seg_window=120000
+  step T1486_encrypt_impact   bit=3 match=ttp:T1486 prereq=1,2 seg_window=120000 enforceable block

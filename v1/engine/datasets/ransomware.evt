@@ -1,0 +1,10 @@
+# Ransomware fast-encrypt chain (Windows). Expected: DENY at the first encrypting
+# write, because the storyline is ARMED after vssadmin (T1490).
+# T1059 (exec interpreter) -> {T1083 discovery, T1490 inhibit recovery} -> T1486 encrypt
+ts=1000 op=exec  actor=100.1 object=proc:200.5  image=C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe cmd="-nop -w hidden -enc SQBFAFgA"
+ts=1500 op=open  actor=200.5 object=file:DIR_documents enum=1
+ts=1600 op=open  actor=200.5 object=file:DIR_pictures  enum=1
+ts=2000 op=exec  actor=200.5 object=proc:300.10 image=C:\Windows\System32\vssadmin.exe cmd="delete shadows /all /quiet"
+ts=2500 op=write actor=200.5 object=file:DOC1 dir=C:\Users\a\Documents entropy=0.96 pe=0
+ts=2600 op=write actor=200.5 object=file:DOC2 dir=C:\Users\a\Pictures  entropy=0.95 pe=0
+ts=2700 op=write actor=200.5 object=file:DOC3 dir=C:\Users\a\Desktop   entropy=0.97 pe=0

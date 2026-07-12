@@ -1,0 +1,21 @@
+[package]
+name = "edr-proto"
+version = "0.1.0"
+edition = "2021"
+description = "Wire contract between the endpoint service and the backend service: prost-generated codec for wire.proto plus the u32le stream framing"
+
+# The schema source of truth is ./wire.proto; Rust types are generated at build
+# time by prost-build (protoc comes vendored, nothing to install). This crate is
+# the only place the workspace touches external dependencies — the engine core
+# stays dependency-free.
+[dependencies]
+edr-engine = { path = "../engine" }
+prost = "0.13"
+
+[build-dependencies]
+prost-build = "0.13"
+protoc-bin-vendored = "3"
+
+[lib]
+name = "edr_proto"
+path = "src/lib.rs"

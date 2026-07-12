@@ -1,0 +1,21 @@
+[package]
+name = "edr-endpoint-service"
+version = "0.1.0"
+edition = "2021"
+description = "EDR userland service: bridges the kernel sensor to the detection engine and returns block decisions"
+
+# Loads the detection engine as a library and the wire contract (proto/wire.proto)
+# for the backend uplink. No other external dependencies; the Windows minifilter
+# transport uses raw fltlib FFI behind #[cfg(windows)].
+[dependencies]
+edr-engine = { path = "../engine" }
+edr-proto = { path = "../proto" }
+
+[lib]
+name = "edr_endpoint_service"
+path = "src/lib.rs"
+
+[[bin]]
+name = "edr-endpoint-service"
+path = "src/main.rs"
+
