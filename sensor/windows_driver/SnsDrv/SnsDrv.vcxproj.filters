@@ -39,10 +39,10 @@
     <ClCompile Include="Worker.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="ProcessMonitor.cpp">
+    <ClCompile Include="Callbacks.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="Network.cpp">
+    <ClCompile Include="WPF.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
@@ -71,10 +71,10 @@
     <ClInclude Include="Utilities\queue.hpp">
       <Filter>Utilities</Filter>
     </ClInclude>
-    <ClInclude Include="ProcessMonitor.hpp">
+    <ClInclude Include="Callbacks.hpp">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="Network.hpp">
+    <ClInclude Include="WPF.hpp">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

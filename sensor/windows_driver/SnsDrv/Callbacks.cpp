@@ -2,11 +2,11 @@
 *     Includes      *
 ********************/
 
-#include "ProcessMonitor.hpp"
+#include "Callbacks.hpp"
 
 // Logging via tracing
 #include "trace.h"
-#include "ProcessMonitor.tmh"
+#include "Callbacks.tmh"
 
 /*********************
 *    Declarations    *

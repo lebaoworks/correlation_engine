@@ -11,8 +11,8 @@
 // Functional
 #include "MiniFilter.hpp"
 #include "Worker.hpp"
-#include "ProcessMonitor.hpp"
-#include "Network.hpp"
+#include "Callbacks.hpp"
+#include "WPF.hpp"
 #include "ArmTable.hpp"
 
 /*********************

@@ -2,7 +2,7 @@
 *     Includes      *
 ********************/
 
-#include "Network.hpp"
+#include "WPF.hpp"
 
 #define NDIS_SUPPORT_NDIS620 1      // Enable NDIS 6.20 features (Required for Windows 10 and above, adjust as needed for compatibility)
 #include <fwpsk.h>
@@ -12,7 +12,7 @@
 
 // Logging via tracing
 #include "trace.h"
-#include "Network.tmh"
+#include "WPF.tmh"
 
 /*********************
 *    Declarations    *
