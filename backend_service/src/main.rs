@@ -12,11 +12,21 @@
 use edr_backend_service::{Ingestor, Output};
 use std::env;
 use std::fs;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::process::ExitCode;
+use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender};
+use std::thread;
+use std::time::Duration;
 
 const DEFAULT_ADDR: &str = "127.0.0.1:7171";
+
+/// Bounded print queue between the receiver thread and the printer thread. Full ⇒
+/// the console can't keep up with the ingest rate; we drop console lines (the graph
+/// still ingested every event) rather than let the receiver block on the console and
+/// stall the socket read — which is exactly what fills the OS buffer and resets the
+/// loopback connection.
+const PRINT_QUEUE_CAP: usize = 65536;
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -60,27 +70,33 @@ fn main() -> ExitCode {
                 }
             };
             let mut ing = Ingestor::new();
-            println!("edr-backend-service · nguồn = {}\n", path);
-            if let Err(e) = feed(&mut ing, &data) {
+            eprintln!("edr-backend-service · nguồn = {}", path);
+            let mut out = io::BufWriter::new(io::stdout());
+            if let Err(e) = feed(&mut ing, &data, &mut out) {
+                let _ = out.flush();
                 eprintln!("decode error: {}", e);
                 return ExitCode::from(1);
             }
+            let _ = out.flush();
             summary(&ing);
             ExitCode::SUCCESS
         }
         Mode::Stdin => {
             let mut ing = Ingestor::new();
-            println!("edr-backend-service · nguồn = stdin\n");
+            eprintln!("edr-backend-service · nguồn = stdin");
             let mut chunk = [0u8; 64 * 1024];
             let mut stdin = io::stdin();
+            let mut out = io::BufWriter::with_capacity(256 * 1024, io::stdout());
             loop {
                 match stdin.read(&mut chunk) {
                     Ok(0) => break,
                     Ok(n) => {
-                        if let Err(e) = feed(&mut ing, &chunk[..n]) {
+                        if let Err(e) = feed(&mut ing, &chunk[..n], &mut out) {
+                            let _ = out.flush();
                             eprintln!("decode error: {}", e);
                             return ExitCode::from(1);
                         }
+                        let _ = out.flush();
                     }
                     Err(e) => {
                         eprintln!("read error: {}", e);
@@ -88,6 +104,7 @@ fn main() -> ExitCode {
                     }
                 }
             }
+            let _ = out.flush();
             summary(&ing);
             ExitCode::SUCCESS
         }
@@ -108,7 +125,15 @@ fn listen(addr: &str) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    println!("edr-backend-service · lắng nghe {} (chờ endpoint service kết nối, Ctrl+C để dừng)\n", addr);
+    eprintln!("edr-backend-service · lắng nghe {} (chờ endpoint service kết nối, Ctrl+C để dừng)", addr);
+
+    // Two threads: THIS one (receiver) accepts, reads the socket, ingests into the
+    // graph, and enqueues printable output; the PRINTER thread drains the queue and
+    // writes stdout. The receiver never waits on the (slow) console, so console I/O
+    // can't stall the read loop and let the OS buffer fill → loopback reset. stdout
+    // carries only event data (printer thread); status/errors go to stderr here.
+    let (tx, rx) = sync_channel::<Output>(PRINT_QUEUE_CAP);
+    let printer = thread::spawn(move || printer_loop(rx));
 
     // The graph outlives connections: an endpoint may reconnect and keep shipping
     // into the same forensic history.
@@ -119,57 +144,140 @@ fn listen(addr: &str) -> ExitCode {
             Ok(s) => {
                 conns += 1;
                 let peer = s.peer_addr().map(|a| a.to_string()).unwrap_or_else(|_| "?".to_string());
-                println!("── kết nối #{} từ {} ─────────────────────────────", conns, peer);
-                if let Err(e) = drain_conn(&mut ing, s) {
-                    eprintln!("connection error: {}", e);
-                }
-                println!("── kết nối #{} đóng ──", conns);
+                eprintln!("── [{}] kết nối #{} từ {} ─────────────", ts_now(), conns, peer);
+                let _ = drain_conn(&mut ing, s, &tx);
+                eprintln!("── kết nối #{} đóng ──", conns);
                 summary(&ing);
-                println!();
             }
             Err(e) => eprintln!("accept error: {}", e),
         }
     }
+    drop(tx); // let the printer drain and exit
+    let _ = printer.join();
     ExitCode::SUCCESS
 }
 
-fn drain_conn(ing: &mut Ingestor, mut s: TcpStream) -> io::Result<()> {
+/// Receiver side (thread 1): read the socket as fast as possible, ingest into the
+/// graph, and hand printable output to the printer thread. Enqueue is NON-blocking —
+/// a full queue drops *console* lines (the graph still ingested every event), never
+/// blocking the read. Connection status/errors go to stderr.
+fn drain_conn(ing: &mut Ingestor, mut s: TcpStream, tx: &SyncSender<Output>) -> io::Result<()> {
     let mut chunk = [0u8; 64 * 1024];
+    let mut dropped = 0u64;
     loop {
-        let n = s.read(&mut chunk)?;
-        if n == 0 {
-            if ing.pending_bytes() != 0 {
-                eprintln!("warning: {} byte lửng chưa thành frame khi kết nối đóng", ing.pending_bytes());
+        let n = match s.read(&mut chunk) {
+            Ok(n) => n,
+            Err(e) => {
+                // Full detail (kind + OS code, e.g. 10054) at the moment of the drop,
+                // to correlate with the endpoint's write error on the other console.
+                eprintln!("  ⚠ [{}] LỖI ĐỌC socket từ endpoint: {} — đóng kết nối", ts_now(), err_detail(&e));
+                report_dropped(dropped);
+                return Err(e);
             }
+        };
+        if n == 0 {
+            eprintln!("  [{}] endpoint đóng kết nối (EOF sạch)", ts_now());
+            if ing.pending_bytes() != 0 {
+                eprintln!("  ⚠ {} byte lửng chưa thành frame khi kết nối đóng", ing.pending_bytes());
+            }
+            report_dropped(dropped);
             return Ok(());
         }
-        if let Err(e) = feed(ing, &chunk[..n]) {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, e));
+        match ing.push_bytes(&chunk[..n]) {
+            Ok(outs) => {
+                for out in outs {
+                    // try_send: if the printer is behind, drop this console line rather
+                    // than block the read loop (the event is already in the graph).
+                    if tx.try_send(out).is_err() {
+                        dropped += 1;
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("  ⚠ [{}] LỖI GIẢI MÃ stream: {} — đóng kết nối", ts_now(), e);
+                return Err(io::Error::new(io::ErrorKind::InvalidData, e));
+            }
         }
     }
 }
 
-fn feed(ing: &mut Ingestor, data: &[u8]) -> Result<(), String> {
-    for out in ing.push_bytes(data)? {
-        match out {
-            Output::Event(line) => println!("{}", line),
-            Output::Alert { header, chain } => {
-                println!("\n{}", header);
-                println!("{}", chain);
+fn report_dropped(dropped: u64) {
+    if dropped > 0 {
+        eprintln!("  ⚠ {} dòng console bị bỏ (console không theo kịp; graph vẫn ingest đủ)", dropped);
+    }
+}
+
+/// Printer side (thread 2): drain the queue and write to a buffered stdout, batching
+/// (one flush per burst) so console I/O never back-pressures the receiver. Exits when
+/// the sender is dropped and the queue is drained.
+fn printer_loop(rx: Receiver<Output>) {
+    let mut w = io::BufWriter::with_capacity(256 * 1024, io::stdout());
+    loop {
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(first) => {
+                write_output(&mut w, &first);
+                while let Ok(next) = rx.try_recv() {
+                    write_output(&mut w, &next);
+                }
+                let _ = w.flush();
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                let _ = w.flush();
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                let _ = w.flush();
+                break;
             }
         }
+    }
+}
+
+fn write_output<W: Write>(w: &mut W, out: &Output) {
+    let _ = match out {
+        Output::Event(line) => writeln!(w, "{}", line),
+        Output::Alert { header, chain } => writeln!(w, "\n{}\n{}", header, chain),
+    };
+}
+
+/// Decode + ingest, writing output to `w` (a buffered writer, NOT locking+flushing
+/// stdout per line — that per-line console cost is what stalls the socket read loop
+/// under a flood and lets the loopback connection reset).
+fn feed<W: Write>(ing: &mut Ingestor, data: &[u8], w: &mut W) -> Result<(), String> {
+    for out in ing.push_bytes(data)? {
+        let r = match out {
+            Output::Event(line) => writeln!(w, "{}", line),
+            Output::Alert { header, chain } => writeln!(w, "\n{}\n{}", header, chain),
+        };
+        r.map_err(|e| format!("write stdout: {}", e))?;
     }
     Ok(())
 }
 
 fn summary(ing: &Ingestor) {
-    println!(
+    // Status → stderr so stdout stays a clean event-only stream (single writer).
+    eprintln!(
         "--- graph: {} event ingest · {} alert · {} chuỗi đã dựng · {} frame lỗi bỏ qua ---",
         ing.events,
         ing.alerts,
         ing.backend.chains.len(),
         ing.bad_frames
     );
+}
+
+/// Wall-clock HH:MM:SS.mmm (UTC) so backend and endpoint logs can be lined up.
+fn ts_now() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let d = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+    let s = d.as_secs();
+    format!("{:02}:{:02}:{:02}.{:03}", (s / 3600) % 24, (s / 60) % 60, s % 60, d.subsec_millis())
+}
+
+/// Full detail of an I/O error: message + kind + raw OS code (e.g. 10053/10054).
+fn err_detail(e: &io::Error) -> String {
+    match e.raw_os_error() {
+        Some(code) => format!("{} [kind={:?}, os={}]", e, e.kind(), code),
+        None => format!("{} [kind={:?}]", e, e.kind()),
+    }
 }
 
 fn print_help() {

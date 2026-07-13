@@ -7,6 +7,16 @@ Khi endpoint chặn, nó bắn kèm một **`BlockReport` (alert)**; backend rà
 toàn bộ STORYLINE dẫn tới hành vi bị chặn và hiển thị cho SOC — việc endpoint không tự làm
 được vì endpoint không giữ edge nào.
 
+## Kiến trúc 2 thread (chế độ `--listen`)
+
+- **Thread nhận**: accept + đọc socket + ingest vào graph + đẩy output vào hàng đợi
+  bounded. **Không bao giờ chờ console** → console chậm không làm nghẽn vòng đọc socket
+  (đó chính là nguyên nhân buffer đầy → loopback bị reset 10053/10054 dưới flood).
+- **Thread in**: rút hàng đợi → ghi **stdout** có buffer, gộp flush theo cụm.
+- Hàng đợi đầy (console không theo kịp) → **bỏ dòng console** (graph vẫn ingest đủ), không block.
+- **stdout = chỉ luồng event** (thread in); **stderr = banner/kết nối/summary/lỗi** (thread nhận).
+  Nhờ vậy có thể `> events.log` để bắt riêng event, xem trạng thái live trên stderr.
+
 ## Chạy
 
 ```bash
@@ -22,8 +32,8 @@ Demo hai console (từ gốc repo, workspace):
 ```bash
 # console 1
 cargo run --bin edr-backend-service
-# console 2 — kịch bản LSASS-dump dựng sẵn, ship qua TCP
-cargo run --bin edr-endpoint-service -- --backend 127.0.0.1:7171
+# console 2 — kịch bản LSASS-dump dựng sẵn (endpoint mặc định ship 127.0.0.1:7171)
+cargo run --bin edr-endpoint-service -- --demo
 ```
 
 Console backend in:

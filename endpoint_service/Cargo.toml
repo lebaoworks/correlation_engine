@@ -8,8 +8,11 @@ description = "EDR userland service: bridges the kernel sensor to the detection 
 # for the backend uplink. No other external dependencies; the Windows minifilter
 # transport uses raw fltlib FFI behind #[cfg(windows)].
 [dependencies]
+clap = { version = "4.6.1", features = ["derive"] }
 edr-engine = { path = "../engine" }
 edr-proto = { path = "../proto" }
+env_logger = "0.11.11"
+log = "0.4.33"
 
 [lib]
 name = "edr_endpoint_service"

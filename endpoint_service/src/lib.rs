@@ -24,10 +24,16 @@ pub const SERVICE_RULES: &str = concat!(
     include_str!("../rules/lsass_pattern.rules"),
 );
 
-/// One decoded event's outcome, ready to print.
+/// One decoded event's outcome, ready to print. The `advanced`/`completed` flags
+/// come straight from the engine verdict so the caller can pick a log level:
+/// no match → debug, matched an automaton → info, completed a chain → warn.
 pub struct EventOutcome {
     pub line: String,
     pub deny: bool,
+    /// The event committed ≥1 automaton step (matched a live detection).
+    pub advanced: bool,
+    /// The event drove a pattern to accept (a detection chain completed).
+    pub completed: bool,
 }
 
 /// Result of processing one batch.
@@ -122,6 +128,8 @@ impl Service {
                     vtxt
                 ),
                 deny: is_deny,
+                advanced: v.advanced,
+                completed: v.completed,
             });
         }
         // Collect the control-plane arm deltas this batch produced; the caller

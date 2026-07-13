@@ -42,6 +42,11 @@ pub struct Verdict {
     pub pattern: String,
     pub score: f64,
     pub reason: String,
+    /// This event committed ≥1 automaton step — i.e. it matched/advanced a live
+    /// detection (even if the score stayed below any alert threshold).
+    pub advanced: bool,
+    /// This event drove a pattern to its accepting set — a detection chain completed.
+    pub completed: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

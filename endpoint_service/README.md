@@ -7,20 +7,47 @@ về sensor**.
 
 ## Chạy
 
+Args parse bằng `clap`. **Mặc định**: nguồn = sensor live `--com-port \SnsDrvPort`,
+ship lên backend `--remote-addr 127.0.0.1:7171`.
+
 ```bash
-cargo run --bin edr-endpoint-service                     # demo LSASS-dump dựng sẵn (không cần driver)
-cargo run --bin edr-endpoint-service -- --file dump.bin  # replay batch nhị phân bắt từ driver
-cargo run --bin edr-endpoint-service -- --stdin          # đọc batch từ stdin
-cargo run --bin edr-endpoint-service -- --port \SnsDrvPort   # (Windows) kết nối minifilter trực tiếp
-cargo run --bin edr-endpoint-service -- --rules r.rules ...  # nạp rule khác
-cargo run --bin edr-endpoint-service -- --backend 127.0.0.1:7171  # ship event + alert lên backend service
+cargo run --bin edr-endpoint-service                          # (Windows) live sensor + ship backend (mặc định)
+cargo run --bin edr-endpoint-service -- --com-port \SnsDrvPort --remote-addr 127.0.0.1:7171  # (đầy đủ, = mặc định)
+cargo run --bin edr-endpoint-service -- --demo --in-process   # kịch bản LSASS-dump dựng sẵn, backend in-process (mọi nền tảng)
+cargo run --bin edr-endpoint-service -- --file dump.bin       # replay batch nhị phân bắt từ driver
+cargo run --bin edr-endpoint-service -- --stdin               # đọc batch từ stdin
+cargo run --bin edr-endpoint-service -- --rules r.rules       # nạp rule khác
+cargo run --bin edr-endpoint-service -- --help                # liệt kê đầy đủ cờ + default
 cargo test
 ```
 
-Với `--backend <addr>`: outbox của endpoint (mọi event + `BlockReport` khi chặn) được ship
-qua TCP tới `edr-backend-service` (crate `../backend_service`) thay vì backend in-process —
-graph đầy đủ và STORYLINE khi chặn hiển thị **trên console của backend**. Không có cờ này,
-hành vi giữ nguyên như cũ (backend chạy in-process, chuỗi in tại chỗ).
+- **Nguồn** (loại trừ nhau): mặc định `--com-port` (live, chỉ Windows); override bằng
+  `--file` / `--stdin` / `--demo`.
+- **Backend**: mặc định ship qua TCP tới `--remote-addr` (`edr-backend-service`, crate
+  `../backend_service`) trên **thread shipper riêng** — graph đầy đủ + STORYLINE hiển thị
+  **trên console backend**. Dùng `--in-process` để chạy backend trong tiến trình (in tại chỗ),
+  không mở TCP.
+
+## Logging (`log` + `env_logger`)
+
+Mức log theo quan hệ event ↔ automaton phát hiện:
+
+| Trường hợp | Mức |
+|---|---|
+| Event **không khớp** automaton nào | `debug` |
+| Event **khớp/tiến triển** một automaton (chưa xong chuỗi) | `info` |
+| Event **hoàn thành chuỗi** (pattern accept / block) | `warn` |
+
+Lọc bằng biến môi trường `RUST_LOG` (mặc định `info`, nên `debug` — các event không khớp
+— ẩn cho tới khi cần):
+
+```bash
+RUST_LOG=info  edr-endpoint-service ...   # info + warn (mặc định)
+RUST_LOG=debug edr-endpoint-service ...   # thấy cả event không khớp + mốc [winport]
+RUST_LOG=warn  edr-endpoint-service ...   # chỉ chuỗi hoàn thành + lỗi
+```
+
+Format: `[HH:MM:SS.mmm LEVEL] <msg>` — cùng timestamp với backend để đối chiếu.
 
 Demo in ra (đầu-cuối, chạy được trên mọi nền tảng):
 ```
@@ -69,6 +96,6 @@ Trên Windows, `WinPortSource::reply` gửi 1 byte quyết định qua `FilterRe
 - Sensor hiện chỉ phát process + file-open + process-open + remote-thread (chưa có **file write +
   entropy**), nên pattern ransomware (T1486) chưa dựng được từ sensor này; ca demo đầu-cuối là
   **LSASS credential dump (T1003)** — khớp đúng các event-type sensor có.
-- `--port` chỉ build/chạy trên Windows (`#[cfg(windows)]`, FFI thô tới `fltlib`); trên nền khác
-  dùng `--demo/--file/--stdin`. Lõi giải mã + ánh xạ + engine là cross-platform và có test
+- `--com-port` (live sensor) chỉ build/chạy trên Windows (`#[cfg(windows)]`, FFI thô tới `fltlib`);
+  trên nền khác dùng `--demo/--file/--stdin`. Lõi giải mã + ánh xạ + engine là cross-platform và có test
   (`tests/integration.rs`).

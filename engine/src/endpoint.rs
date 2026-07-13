@@ -31,7 +31,14 @@ const W_ORDER: f64 = 1.0;
 const W_RARITY: f64 = 2.0;
 
 fn verdict_none() -> Verdict {
-    Verdict { kind: VerdictKind::None, pattern: String::new(), score: 0.0, reason: String::new() }
+    Verdict {
+        kind: VerdictKind::None,
+        pattern: String::new(),
+        score: 0.0,
+        reason: String::new(),
+        advanced: false,
+        completed: false,
+    }
 }
 
 /// A control-plane command the endpoint pushes to the kernel sensor so that
@@ -418,6 +425,8 @@ impl Endpoint {
         // (b) advance every automaton on this storyline
         let pattern_ids: Vec<String> = self.storylines[&sid].automata.keys().cloned().collect();
         let mut best = verdict_none();
+        let mut advanced = false; // this event committed ≥1 step (matched an automaton)
+        let mut completed = false; // this event drove some pattern to accept
         for pid in pattern_ids {
             let idx = self.storylines[&sid].automata[&pid].pattern_idx;
             let matching: Vec<u8> = self.rules.patterns[idx]
@@ -428,13 +437,17 @@ impl Endpoint {
                 .collect();
             for bit in matching {
                 if self.try_commit(sid, idx, &pid, bit, e, now) {
+                    advanced = true;
                     let v = self.rescore_and_emit(sid, idx, &pid, bit, e, now);
+                    completed |= v.completed;
                     if v.kind > best.kind {
                         best = v;
                     }
                 }
             }
         }
+        best.advanced = advanced;
+        best.completed = completed;
         best
     }
 
@@ -538,12 +551,14 @@ impl Endpoint {
                     pattern: p.id.clone(),
                     score,
                     reason: format!("chokepoint {}", step.name),
+                    advanced: true,
+                    completed: true,
                 };
             }
             if score >= p.theta_alert {
-                return Verdict { kind: VerdictKind::Alert, pattern: p.id.clone(), score, reason: "accepting".into() };
+                return Verdict { kind: VerdictKind::Alert, pattern: p.id.clone(), score, reason: "accepting".into(), advanced: true, completed: true };
             }
-            return Verdict { kind: VerdictKind::Suspect, pattern: p.id.clone(), score, reason: "accepting-low-score".into() };
+            return Verdict { kind: VerdictKind::Suspect, pattern: p.id.clone(), score, reason: "accepting-low-score".into(), advanced: true, completed: true };
         }
 
         // Not yet accepting: arm the kernel (by actor identity) if confident and an
@@ -570,8 +585,18 @@ impl Endpoint {
         }
 
         if score >= p.theta_alert {
-            Verdict { kind: VerdictKind::Alert, pattern: p.id.clone(), score, reason: "partial-high-score".into() }
+            // Advanced (a step committed) but the pattern hasn't accepted yet.
+            Verdict {
+                kind: VerdictKind::Alert,
+                pattern: p.id.clone(),
+                score,
+                reason: "partial-high-score".into(),
+                advanced: true,
+                completed: false,
+            }
         } else {
+            // Committed a step but below any threshold → no verdict, still "advanced"
+            // is set by advance(); here just report None.
             verdict_none()
         }
     }

@@ -15,6 +15,7 @@ use std::io;
 use std::os::raw::c_void;
 
 use crate::source::EventSource;
+use log::debug;
 
 type Handle = *mut c_void;
 const INVALID_HANDLE: Handle = usize::MAX as Handle;
@@ -69,7 +70,7 @@ impl WinPortSource {
         let mut port: Handle = INVALID_HANDLE;
         // Progress markers on stderr (unbuffered) so if a FltMgr call faults the last
         // line printed pinpoints which one.
-        eprintln!("    [winport] FilterConnectCommunicationPort(\"{}\") ...", port_name);
+        debug!("[winport] FilterConnectCommunicationPort(\"{}\") ...", port_name);
         let hr = unsafe {
             FilterConnectCommunicationPort(
                 wide.as_ptr(),
@@ -83,7 +84,7 @@ impl WinPortSource {
         if hr < 0 {
             return Err(io::Error::new(io::ErrorKind::Other, format!("FilterConnectCommunicationPort 0x{:08x}", hr)));
         }
-        eprintln!("    [winport] port connected; registering self pid {} ...", std::process::id());
+        debug!("[winport] port connected; registering self pid {} ...", std::process::id());
         let mut src = WinPortSource { port, buf: vec![0u8; BUF], last_msg_id: 0, label: port_name.to_string() };
         // Register our own pid so the driver exempts it from enforcement (a
         // self-triggered sync-enforce would deadlock — see EnforcementPlane.md).
@@ -91,7 +92,7 @@ impl WinPortSource {
         if let Err(e) = src.push_control(&self_frame) {
             return Err(io::Error::new(io::ErrorKind::Other, format!("register self pid: {}", e)));
         }
-        eprintln!("    [winport] self pid registered; ready");
+        debug!("[winport] self pid registered; ready");
         Ok(src)
     }
 }
