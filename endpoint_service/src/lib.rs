@@ -82,7 +82,10 @@ impl Service {
         let mut deny = false;
         let mut state_only = 0;
 
-        for se in &events {
+        for se in events {
+            // Read the cheap log hint (Copy fields only) before the record is moved
+            // into the translator, which consumes it to avoid re-copying its strings.
+            let ttp = ttp_hint(&se);
             let ev = match translate::to_engine_event(se) {
                 Some(e) => e,
                 None => {
@@ -91,7 +94,11 @@ impl Service {
                 }
             };
             self.events_seen += 1;
-            let (d, v) = self.pipe.endpoint.on_event(&ev);
+            // Snapshot the display fields before the event is moved into the engine
+            // (which now consumes it, so its strings are never copied on this path).
+            let (ev_ts, ev_op, actor_s, object_s) =
+                (ev.ts, ev.op, key_short(&ev.actor), key_short(&ev.object));
+            let (d, v) = self.pipe.endpoint.on_event(ev);
             // Ship the outbox: to the remote backend service when attached,
             // otherwise into the in-process backend (which reconstructs chains).
             let mut chain = None;
@@ -110,7 +117,6 @@ impl Service {
                     chains.push(c);
                 }
             }
-            let ttp = ttp_hint(se);
             let vtxt = if v.kind == edr_engine::VerdictKind::None {
                 String::new()
             } else {
@@ -119,10 +125,10 @@ impl Service {
             outcomes.push(EventOutcome {
                 line: format!(
                     "  ts={:<10} {:<7} {:<20} -> {:<20} {}{}{}",
-                    ev.ts,
-                    op_name(ev.op),
-                    key_short(&ev.actor),
-                    key_short(&ev.object),
+                    ev_ts,
+                    op_name(ev_op),
+                    actor_s,
+                    object_s,
                     ttp,
                     if is_deny { "DENY" } else { "ALLOW" },
                     vtxt

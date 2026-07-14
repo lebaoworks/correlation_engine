@@ -6,7 +6,7 @@
 //! table, no lookups, no state. The only real work left is the FILETIME→ms
 //! conversion and building the (small) attr map the engine API expects.
 
-use edr_engine::event::{Event, NodeKey, Op};
+use edr_engine::event::{Attrs, Event, NodeKey, Op};
 
 use crate::sensor::SensorEvent;
 
@@ -22,76 +22,72 @@ fn proc(pid: u32, start: i64) -> NodeKey {
     NodeKey::Process { pid, start_ts: ms(start) }
 }
 
-fn ev(ts: u64, op: Op, actor: NodeKey, object: NodeKey, attrs: Vec<(&str, String)>) -> Event {
-    Event {
-        ts,
-        op,
-        actor,
-        object,
-        attrs: attrs.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
-    }
+fn ev(ts: u64, op: Op, actor: NodeKey, object: NodeKey, attrs: Attrs) -> Event {
+    Event { ts, op, actor, object, attrs }
 }
 
-/// Map one sensor event to an engine event. Returns `None` for records the
-/// engine has no op for (process enumeration / exit).
-pub fn to_engine_event(se: &SensorEvent) -> Option<Event> {
+/// Map one sensor event to an engine event, **consuming** the record so the
+/// decoded strings move straight into the engine `Event` — no second copy (the
+/// decode in `sensor::parse_batch` already allocated them once). Returns `None`
+/// for records the engine has no op for (process enumeration / exit).
+pub fn to_engine_event(se: SensorEvent) -> Option<Event> {
     match se {
         SensorEvent::ProcessExist { .. } | SensorEvent::ProcessExit { .. } => None,
 
         SensorEvent::ProcessCreate { ts, pid, pid_start, child_pid, child_start, image, cmdline } => {
             Some(ev(
-                ms(*ts),
+                ms(ts),
                 Op::Exec,
-                proc(*pid, *pid_start),
-                proc(*child_pid, *child_start),
-                vec![("image", image.clone()), ("cmd", cmdline.clone())],
+                proc(pid, pid_start),
+                proc(child_pid, child_start),
+                Attrs { image: Some(image), cmd: Some(cmdline), ..Default::default() },
             ))
         }
 
         SensorEvent::FileOpen { ts, pid, pid_start, file_name } => Some(ev(
-            ms(*ts),
+            ms(ts),
             Op::Open,
-            proc(*pid, *pid_start),
+            proc(pid, pid_start),
             // File identity token: the path stands in for a FileId here (engine.md §2
             // wants a real FileId; the current sensor only reports the name).
-            NodeKey::File { file_id: file_name.clone() },
-            vec![],
+            NodeKey::File { file_id: file_name },
+            Attrs::default(),
         )),
 
         // First write to a file → Op::Write (dropper "write then exec", ransomware
         // write rate/spread). Entropy / PE-ness enrichment is future work, so no
         // `entropy`/`pe` attrs yet; the raw write still drives rate/spread + arming.
         SensorEvent::FileWrite { ts, pid, pid_start, file_name } => Some(ev(
-            ms(*ts),
+            ms(ts),
             Op::Write,
-            proc(*pid, *pid_start),
-            NodeKey::File { file_id: file_name.clone() },
-            vec![],
+            proc(pid, pid_start),
+            NodeKey::File { file_id: file_name },
+            Attrs::default(),
         )),
 
         SensorEvent::ProcessOpen { ts, pid, pid_start, target_pid, target_start, desired_access, target_image } => {
-            let mut attrs: Vec<(&str, String)> = Vec::new();
+            let mut attrs = Attrs::default();
             if !target_image.is_empty() {
-                attrs.push(("target_image", target_image.clone()));
+                attrs.target_image = Some(target_image);
             }
             if desired_access & PROCESS_VM_READ != 0 {
-                attrs.push(("vm_read", "1".to_string()));
+                attrs.vm_read = true;
             }
             Some(ev(
-                ms(*ts),
+                ms(ts),
                 Op::Read,
-                proc(*pid, *pid_start),
-                proc(*target_pid, *target_start),
+                proc(pid, pid_start),
+                proc(target_pid, target_start),
                 attrs,
             ))
         }
 
         SensorEvent::RemoteThreadCreate { ts, pid, pid_start, target_pid, target_start, .. } => Some(ev(
-            ms(*ts),
+            ms(ts),
             Op::Inject,
-            proc(*pid, *pid_start),
-            proc(*target_pid, *target_start),
-            vec![],
+            proc(pid, pid_start),
+            proc(target_pid, target_start),
+            Attrs::default(),
         )),
     }
 }

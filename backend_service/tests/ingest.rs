@@ -3,22 +3,19 @@
 
 use edr_backend_service::{Ingestor, Output};
 use edr_engine::wire::{BlockReport, Wire, WireEvent};
-use edr_engine::{Event, NodeKey, Op};
+use edr_engine::{Attrs, Event, NodeKey, Op};
 use edr_proto::encode_frame;
-use std::collections::HashMap;
 
 fn proc(pid: u32, start_ts: u64) -> NodeKey {
     NodeKey::Process { pid, start_ts }
 }
 
 fn ev(ts: u64, op: Op, actor: NodeKey, object: NodeKey, attrs: &[(&str, &str)]) -> Event {
-    Event {
-        ts,
-        op,
-        actor,
-        object,
-        attrs: attrs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+    let mut a = Attrs::default();
+    for (k, v) in attrs {
+        a.set(k, *v);
     }
+    Event { ts, op, actor, object, attrs: a }
 }
 
 /// The demo scenario as raw wire bytes: exec mimikatz (causal) → mimikatz reads

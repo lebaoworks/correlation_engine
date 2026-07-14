@@ -19,8 +19,9 @@
 //! a known non-`OP_UNSPECIFIED` value.
 
 use edr_engine::wire::{BlockReport, Wire, WireEvent};
-use edr_engine::{Event, NodeKey, Op};
+use edr_engine::{Attrs, Event, NodeKey, Op};
 use prost::Message;
+use std::collections::BTreeMap;
 
 /// Generated protobuf types for `package edr.wire.v1` (source: `wire.proto`).
 pub mod pb {
@@ -92,8 +93,39 @@ fn pb_event(e: &Event) -> pb::Event {
         op: pb_op(e.op) as i32,
         actor: Some(pb_key(&e.actor)),
         object: Some(pb_key(&e.object)),
-        attrs: e.attrs.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+        attrs: pb_attrs(&e.attrs),
     }
+}
+
+/// Flatten the typed `Attrs` back into the wire's `map<string,string>` (only set
+/// fields are emitted), preserving the on-the-wire contract with the backend.
+fn pb_attrs(a: &Attrs) -> BTreeMap<String, String> {
+    let mut m = BTreeMap::new();
+    if let Some(v) = &a.image {
+        m.insert("image".to_string(), v.clone());
+    }
+    if let Some(v) = &a.cmd {
+        m.insert("cmd".to_string(), v.clone());
+    }
+    if let Some(v) = &a.target_image {
+        m.insert("target_image".to_string(), v.clone());
+    }
+    if let Some(v) = &a.dir {
+        m.insert("dir".to_string(), v.clone());
+    }
+    if let Some(v) = a.entropy {
+        m.insert("entropy".to_string(), v.to_string());
+    }
+    if a.pe {
+        m.insert("pe".to_string(), "1".to_string());
+    }
+    if a.vm_read {
+        m.insert("vm_read".to_string(), "1".to_string());
+    }
+    if a.enumerate {
+        m.insert("enum".to_string(), "1".to_string());
+    }
+    m
 }
 
 fn pb_key(k: &NodeKey) -> pb::NodeKey {
@@ -147,12 +179,16 @@ fn wire_from_pb(m: pb::Wire) -> Result<Wire, String> {
 }
 
 fn event_from_pb(e: pb::Event) -> Result<Event, String> {
+    let mut attrs = Attrs::default();
+    for (k, v) in e.attrs {
+        attrs.set(&k, v);
+    }
     Ok(Event {
         ts: e.ts,
         op: op_from_pb(e.op)?,
         actor: key_from_pb(e.actor.ok_or("Event: missing actor")?)?,
         object: key_from_pb(e.object.ok_or("Event: missing object")?)?,
-        attrs: e.attrs.into_iter().collect(),
+        attrs,
     })
 }
 

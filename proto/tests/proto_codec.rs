@@ -1,9 +1,8 @@
 //! Contract tests for the hand-written protobuf codec (wire.proto).
 
 use edr_engine::wire::{BlockReport, Wire, WireEvent};
-use edr_engine::{Event, NodeKey, Op};
+use edr_engine::{Attrs, Event, NodeKey, Op};
 use edr_proto::{decode_frame, encode_frame};
-use std::collections::HashMap;
 
 /// The bare protobuf payload of a record (frame with its 4-byte length prefix stripped).
 fn payload_of(w: &Wire) -> Vec<u8> {
@@ -24,9 +23,9 @@ fn decode_payload(payload: &[u8]) -> Result<Wire, String> {
 }
 
 fn sample_event() -> Event {
-    let mut attrs = HashMap::new();
-    attrs.insert("image".to_string(), r"C:\Tools\mimikatz.exe".to_string());
-    attrs.insert("cmd".to_string(), "sekurlsa::logonpasswords".to_string());
+    let mut attrs = Attrs::default();
+    attrs.set("image", r"C:\Tools\mimikatz.exe");
+    attrs.set("cmd", "sekurlsa::logonpasswords");
     Event {
         ts: 21_000_000,
         op: Op::Read,
@@ -58,7 +57,7 @@ fn golden_bytes_match_protobuf_wire_format() {
             op: Op::Exec,
             actor: NodeKey::Process { pid: 2, start_ts: 3 },
             object: NodeKey::File { file_id: "f".to_string() },
-            attrs: HashMap::new(),
+            attrs: Attrs::default(),
         },
     });
     #[rustfmt::skip]
@@ -137,7 +136,7 @@ fn roundtrip_all_key_kinds_and_defaults() {
         op: Op::Connect,
         actor: NodeKey::Other { kind: "user".to_string(), key: "S-1-5-21".to_string() },
         object: NodeKey::Socket { key: "10.0.0.5:443".to_string() },
-        attrs: HashMap::new(),
+        attrs: Attrs::default(),
     };
     let w = Wire::Event(WireEvent { seq: 0, endpoint_sid: 0, ttps: vec![], event: ev.clone() });
     let (got, _) = decode_frame(&encode_frame(&w)).unwrap().unwrap();
@@ -221,7 +220,7 @@ fn malformed_payloads_are_errors() {
             op: Op::Exec,
             actor: NodeKey::Process { pid: 2, start_ts: 3 },
             object: NodeKey::File { file_id: "f".to_string() },
-            attrs: HashMap::new(),
+            attrs: Attrs::default(),
         },
     }));
     // In the golden layout the op value byte follows the 0x10 key inside Event.

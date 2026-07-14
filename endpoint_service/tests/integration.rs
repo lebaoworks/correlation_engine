@@ -69,7 +69,7 @@ fn file_write_decodes_and_is_a_write() {
         }
         other => panic!("expected FileWrite, got {:?}", other),
     };
-    let ev = translate::to_engine_event(&se).expect("write is not state-only");
+    let ev = translate::to_engine_event(se).expect("write is not state-only");
     assert_eq!(ev.op, edr_engine::Op::Write, "first-write maps to Op::Write");
 }
 

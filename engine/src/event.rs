@@ -5,8 +5,6 @@
 //! a FileId / (dev,inode) — never a path string (engine.md §2). Rename keeps the
 //! same token; copy produces a new one, exactly as FileId behaves.
 
-use std::collections::HashMap;
-
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum Op {
     Exec,   // process spawn: actor=parent, object=child; attrs["image"] = image FileId
@@ -66,6 +64,46 @@ impl NodeKey {
     }
 }
 
+/// Typed, closed-vocabulary event attributes. The engine only ever reads a fixed
+/// set of attrs — the tagger predicate vocabulary (`rules.rs`) — so we store them
+/// as typed fields instead of a per-event `HashMap<String,String>`: no hashmap and
+/// no key-string allocation on the hot path. The `attr`/`attr_bool`/`attr_f64`
+/// accessors on `Event` keep the taggers' string-keyed API unchanged.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Attrs {
+    pub image: Option<String>,        // exec image FileId token (Op::Exec)
+    pub cmd: Option<String>,          // exec command line
+    pub target_image: Option<String>, // ProcessOpen target image
+    pub dir: Option<String>,          // write directory (rate/spread accrual)
+    pub entropy: Option<f64>,         // written-content entropy (enrichment)
+    pub pe: bool,                     // written file is a PE (dropper gate)
+    pub vm_read: bool,                // handle opened with PROCESS_VM_READ
+    pub enumerate: bool,              // open/read is a directory enumeration (attr key "enum")
+}
+
+impl Attrs {
+    /// Set a known attr from a string key/value — used by the `.evt` dataset loader
+    /// and replay/test builders that carry attrs as text. Unknown keys are ignored:
+    /// the vocabulary is closed by design (see `rules.rs`).
+    pub fn set(&mut self, k: &str, v: impl Into<String>) {
+        match k {
+            "image" => self.image = Some(v.into()),
+            "cmd" => self.cmd = Some(v.into()),
+            "target_image" => self.target_image = Some(v.into()),
+            "dir" => self.dir = Some(v.into()),
+            "entropy" => self.entropy = v.into().parse().ok(),
+            "pe" => self.pe = truthy(&v.into()),
+            "vm_read" => self.vm_read = truthy(&v.into()),
+            "enum" => self.enumerate = truthy(&v.into()),
+            _ => {}
+        }
+    }
+}
+
+fn truthy(s: &str) -> bool {
+    matches!(s, "1" | "true")
+}
+
 /// A single normalized telemetry event.
 #[derive(Clone, Debug)]
 pub struct Event {
@@ -73,20 +111,34 @@ pub struct Event {
     pub op: Op,
     pub actor: NodeKey,   // always a process
     pub object: NodeKey,  // file / child process / socket ...
-    pub attrs: HashMap<String, String>,
+    pub attrs: Attrs,
 }
 
 impl Event {
     pub fn attr(&self, k: &str) -> Option<&str> {
-        self.attrs.get(k).map(|s| s.as_str())
+        match k {
+            "image" => self.attrs.image.as_deref(),
+            "cmd" => self.attrs.cmd.as_deref(),
+            "target_image" => self.attrs.target_image.as_deref(),
+            "dir" => self.attrs.dir.as_deref(),
+            _ => None,
+        }
     }
     pub fn attr_f64(&self, k: &str) -> Option<f64> {
-        self.attrs.get(k).and_then(|s| s.parse().ok())
+        match k {
+            "entropy" => self.attrs.entropy,
+            _ => None,
+        }
     }
     pub fn attr_bool(&self, k: &str) -> bool {
-        matches!(self.attrs.get(k).map(|s| s.as_str()), Some("1") | Some("true"))
+        match k {
+            "pe" => self.attrs.pe,
+            "vm_read" => self.attrs.vm_read,
+            "enum" => self.attrs.enumerate,
+            _ => false,
+        }
     }
-    /// The image FileId of an exec (attrs["image"]), resolved to a File key.
+    /// The image FileId of an exec (`attrs.image`), resolved to a File key.
     pub fn image_key(&self) -> Option<NodeKey> {
         self.attr("image").map(|id| NodeKey::File { file_id: id.to_string() })
     }

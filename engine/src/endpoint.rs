@@ -274,7 +274,7 @@ impl Endpoint {
     }
 
     // -- per-event pipeline (§4) ---------------------------------------------
-    pub fn on_event(&mut self, e: &Event) -> (Decision, Verdict) {
+    pub fn on_event(&mut self, e: Event) -> (Decision, Verdict) {
         let now = e.ts;
         let sid = self.link(&e.actor, &e.object, e.op, now);
         if let Some(img) = e.image_key() {
@@ -282,7 +282,7 @@ impl Endpoint {
         }
 
         let rate = self.rate.entry(e.actor.clone()).or_default();
-        let ttps = self.rules.tag(e, rate);
+        let ttps = self.rules.tag(&e, rate);
         {
             let s = self.storylines.get_mut(&sid).unwrap();
             s.last_activity = now;
@@ -294,17 +294,6 @@ impl Endpoint {
             }
         }
 
-        // SHIP every event (ship-and-forget). Edge lives only long enough to update
-        // LINK + rate, then it is the backend's to keep.
-        self.seq += 1;
-        self.shipped_events += 1;
-        self.outbox.push(Wire::Event(WireEvent {
-            seq: self.seq,
-            endpoint_sid: sid,
-            ttps: ttps.clone(),
-            event: e.clone(),
-        }));
-
         // Kernel-arm fast path (arm by identity, §9): the actor is armed for this op
         // and its storyline still has a pending enforceable chokepoint of this op.
         let mut kernel_denied = false;
@@ -314,12 +303,20 @@ impl Endpoint {
             }
         }
 
-        let verdict = self.advance(sid, &ttps, e, now);
+        let verdict = self.advance(sid, &ttps, &e, now);
         let decision = if verdict.kind == VerdictKind::Block || kernel_denied {
             Decision::Deny
         } else {
             Decision::Allow
         };
+
+        // SHIP every event (ship-and-forget). The event and its ttps are **moved**
+        // into the outbox — no per-event copy; the edge lived only long enough to
+        // update LINK + rate, and the record is now the backend's to keep. Only a
+        // block, which must carry the event twice (telemetry + BlockReport), clones it.
+        self.seq += 1;
+        self.shipped_events += 1;
+        let ship_seq = self.seq;
 
         if decision == Decision::Deny {
             // Control-plane: ask the backend to trace & display the whole chain.
@@ -332,15 +329,22 @@ impl Endpoint {
                     "kernel-armed deny".to_string(),
                 )
             };
-            self.seq += 1;
-            self.shipped_blocks += 1;
-            self.outbox.push(Wire::Block(BlockReport { seq: self.seq, pattern, score, reason, event: e.clone() }));
             self.log.push(format!(
                 "ts={} DENY  ship BlockReport → backend (actor={} op={:?})",
                 now,
                 short_key(&e.actor),
                 e.op
             ));
+            self.seq += 1;
+            self.shipped_blocks += 1;
+            let block_seq = self.seq;
+            self.outbox
+                .push(Wire::Event(WireEvent { seq: ship_seq, endpoint_sid: sid, ttps, event: e.clone() }));
+            self.outbox
+                .push(Wire::Block(BlockReport { seq: block_seq, pattern, score, reason, event: e }));
+        } else {
+            self.outbox
+                .push(Wire::Event(WireEvent { seq: ship_seq, endpoint_sid: sid, ttps, event: e }));
         }
 
         // lifecycle: GC dead automata (release pins), then sweep cold unbound entities (§3, §6c)

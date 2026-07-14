@@ -57,7 +57,7 @@ pub enum Decision {
 
 pub use backend::{render_chain, Backend, Chain, ChainStep};
 pub use endpoint::{ArmCmd, Endpoint};
-pub use event::{Event, NodeKey, Op};
+pub use event::{Attrs, Event, NodeKey, Op};
 
 /// Convenience harness: an endpoint feeding a backend over the ship channel.
 pub struct Pipeline {
@@ -81,7 +81,10 @@ impl Pipeline {
     /// Process one event end-to-end. Returns the endpoint decision + verdict, and
     /// any chain the backend rebuilt (present exactly when a block was shipped).
     pub fn feed(&mut self, e: &Event) -> (Decision, Verdict, Option<Chain>) {
-        let (d, v) = self.endpoint.on_event(e);
+        // `feed` is the in-process replay/test path; it keeps the borrowing API and
+        // pays one clone. The production hot path (endpoint service) calls
+        // `on_event` directly and moves the event in — no copy.
+        let (d, v) = self.endpoint.on_event(e.clone());
         let mut chain = None;
         for msg in self.endpoint.drain_outbox() {
             if let Wire::Block(_) = msg {

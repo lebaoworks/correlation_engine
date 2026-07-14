@@ -11,8 +11,7 @@
 //!  * object : `proc:<pid>.<start>` | `file:<FileId>` | `sock:<key>`
 //!  * image  : a File identity token for exec (kept in attrs["image"])
 
-use crate::event::{Event, NodeKey, Op};
-use std::collections::HashMap;
+use crate::event::{Attrs, Event, NodeKey, Op};
 
 pub fn parse_str(input: &str) -> Result<Vec<Event>, String> {
     let mut events = Vec::new();
@@ -32,7 +31,7 @@ fn parse_line(line: &str) -> Result<Event, String> {
     let mut op = None;
     let mut actor = None;
     let mut object = None;
-    let mut attrs: HashMap<String, String> = HashMap::new();
+    let mut attrs = Attrs::default();
 
     for (k, v) in toks {
         match k.as_str() {
@@ -40,12 +39,7 @@ fn parse_line(line: &str) -> Result<Event, String> {
             "op" => op = Some(Op::parse(&v).ok_or_else(|| format!("bad op '{}'", v))?),
             "actor" => actor = Some(parse_process(&v)?),
             "object" => object = Some(parse_object(&v)?),
-            "image" => {
-                attrs.insert("image".into(), v);
-            }
-            _ => {
-                attrs.insert(k, v);
-            }
+            _ => attrs.set(&k, v),
         }
     }
 

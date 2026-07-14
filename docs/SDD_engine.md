@@ -102,11 +102,14 @@ Khóa tự nhiên của node đồ thị:
   **không phải path**.
 - `Socket { key }`, `Other { kind, key }`.
 
-### 3.3 `Event` — [event.rs:71](engine/src/event.rs#L71)
-`{ ts: u64, op: Op, actor: NodeKey (luôn process), object: NodeKey, attrs: HashMap<String,String> }`.
-Attrs mang dữ liệu tagger cần: `image`, `target_image`, `entropy`, `dir`, `enum`, `vm_read`,
-`pe`, `cmd`… Helper: `attr/attr_f64/attr_bool`, và [`image_key()`](engine/src/event.rs#L90)
-resolve `attrs["image"]` → `NodeKey::File`.
+### 3.3 `Event` — [event.rs](engine/src/event.rs)
+`{ ts: u64, op: Op, actor: NodeKey (luôn process), object: NodeKey, attrs: Attrs }`.
+[`Attrs`](engine/src/event.rs) là **struct typed đóng-vocabulary** (thay `HashMap<String,String>`
+để không cấp phát hashmap/key-string trên hot path): `image`, `target_image`, `cmd`, `dir`
+(`Option<String>`), `entropy` (`Option<f64>`), `pe`, `vm_read`, `enumerate` (bool; key wire
+`"enum"`). Accessor `attr/attr_f64/attr_bool` giữ **API string-keyed** cho tagger; `Attrs::set`
+nạp từ key/value text (dataset/replay). [`image_key()`](engine/src/event.rs) resolve `image`
+→ `NodeKey::File`. Proto flatten typed→`map<string,string>` khi serialize nên **wire không đổi**.
 
 ### 3.4 `Pattern` / `Step` — [pattern.rs](engine/src/pattern.rs)
 Pattern là **precedence DAG bậc riêng phần**, tiến độ mã hoá bằng bitmask (`Mask = u64`,
@@ -284,7 +287,7 @@ Pipeline::feed(&Event) -> (Decision, Verdict, Option<Chain>)
 
 // Endpoint
 Endpoint::new() / from_rules_str / from_rules_file / with_rules(RuleSet)
-Endpoint::on_event(&Event) -> (Decision, Verdict)
+Endpoint::on_event(Event) -> (Decision, Verdict)   // consume: move event vào outbox, không copy
 Endpoint::drain_outbox() -> Vec<Wire>
 Endpoint::drain_arm_cmds() -> Vec<ArmCmd>
 Endpoint::set_window_ms / active_len / storyline_count
