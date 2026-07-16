@@ -36,7 +36,7 @@
     <ClCompile Include="MiniFilter.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="Worker.cpp">
+    <ClCompile Include="Ring.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="Callbacks.cpp">
@@ -59,7 +59,7 @@
     <ClInclude Include="MiniFilter.hpp">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="Worker.hpp">
+    <ClInclude Include="Ring.hpp">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="Event.hpp">

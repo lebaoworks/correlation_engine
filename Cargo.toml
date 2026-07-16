@@ -6,7 +6,9 @@
 [workspace]
 resolver = "2"
 members = ["engine", "proto", "endpoint_service", "backend_service"]
-exclude = ["bak"]
+# sensor/windows_driver là crate kernel `no_std` (nightly, target windows-msvc,
+# build bằng cargo-make + WDK) — không thuộc workspace std/cross-platform này.
+exclude = ["bak", "sensor/windows_driver"]
 
 [profile.release]
 opt-level = 3

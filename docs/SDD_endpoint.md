@@ -16,7 +16,8 @@
 ### 1.1 Mục đích
 `edr-endpoint-service` là **console app** chạy ở userland trên endpoint. Trách nhiệm:
 
-- **Nhận** batch sự kiện từ sensor kernel qua cổng minifilter (`\SnsDrvPort`).
+- **Nhận** sự kiện từ sensor kernel qua **shared-memory ring** (driver cấp phát non-paged
+  pool rồi map vào service); cổng minifilter (`\SnsDrvPort`) chỉ còn mang control-plane.
 - **Giải mã** wire format v2 nhị phân → `SensorEvent`, **chuẩn hoá** → engine `Event`.
 - **Nạp** từng event vào lõi phát hiện inline ([`edr_engine::Endpoint`]) và **trả verdict**
   ALLOW/DENY về sensor trên đường enforcement đồng bộ.
@@ -60,18 +61,24 @@ crate `edr-engine`.
 ```
    SENSOR (kernel minifilter)                    ENDPOINT SERVICE (userland)                 BACKEND
    ┌──────────────────────┐   wire v2 frame     ┌───────────────────────────────┐          ┌─────────┐
-   │  SnsDrv  \SnsDrvPort  │ ──FilterGetMessage► │  Thread 1: vòng lặp sự kiện    │          │  edr-   │
-   │  (WPF/Worker/ArmTable)│                     │   winport → sensor::decode     │          │ backend │
-   │                       │ ◄─FilterReplyMsg─── │   → translate → engine.on_event│  Wire    │ service │
-   │                       │   verdict (1 byte)  │   → reply sensor               │ (protobuf│         │
-   │                       │ ◄─FilterSendMsg──── │   → enqueue Wire (non-block)   │  /TCP)   │         │
-   │                       │   ArmCmd (control)  │                                │ ───────► │         │
-   └──────────────────────┘                     │  Thread 2: shipper_loop        │          └─────────┘
-                                                 │   drain → encode_frame → ship  │
+   │  SnsDrv               │ ══ SHARED RING ═══► │  Thread 1: vòng lặp sự kiện    │          │  edr-   │
+   │  (Ring/ArmTable)      │   (không syscall)   │   ring → sensor::decode        │          │ backend │
+   │                       │ ──doorbell KEVENT─► │   → translate → engine.on_event│  Wire    │ service │
+   │                       │   (chỉ khi ngủ)     │   → reply sensor               │ (protobuf│         │
+   │                       │                     │   → enqueue Wire (non-block)   │  /TCP)   │         │
+   │  \SnsDrvPort          │ ◄─FilterSendMsg──── │                                │ ───────► │         │
+   │  (control only)       │   ArmCmd/Register/  │  Thread 2: shipper_loop        │          └─────────┘
+   └──────────────────────┘   Verdict           │   drain → encode_frame → ship  │
                                                  │   tự reconnect                 │
                                                  └───────────────────────────────┘
                                                    bounded channel (cap 8192, đầy⇒drop)
 ```
+
+Telemetry đi qua ring nên **không có kernel transition nào** ở steady state: producer chỉ
+ghi vào slot, và chỉ rung doorbell khi consumer đã ngủ. Cổng minifilter chỉ còn chiều
+user→kernel (arm/disarm, đăng ký ring, verdict) — vài record/giây so với hàng triệu
+event/giây đi ngược lại. Xem `sensor/windows_driver/SnsDrv/readme.md` cho lý do không
+dùng inverted call và không làm ring chiều xuống.
 
 ### 2.2 Bản đồ module ↔ trách nhiệm
 
@@ -81,9 +88,11 @@ crate `edr-engine`.
 | `lib` | [lib.rs](../endpoint_service/src/lib.rs) | `Service` + `process_batch`; `BatchOutcome`; rule set mặc định |
 | `sensor` | [sensor.rs](../endpoint_service/src/sensor.rs) | Wire v2: **decode** frame→`SensorEvent`, **encode** (demo/test) |
 | `translate` | [translate.rs](../endpoint_service/src/translate.rs) | `SensorEvent` → engine `Event` (consume by-value, move string) |
-| `control` | [control.rs](../endpoint_service/src/control.rs) | Control-plane: encode `ArmCmd`/`SetSelf` xuống sensor (16B/record) |
+| `control` | [control.rs](../endpoint_service/src/control.rs) | Control-plane: encode `ArmCmd`/`SetSelf`/`RegisterRing`/`Verdict` xuống sensor (16B/record) |
 | `source` | [source.rs](../endpoint_service/src/source.rs) | Trait `EventSource`; `ReaderSource` (file/stdin), `VecSource` (demo) |
-| `winport` | [winport.rs](../endpoint_service/src/winport.rs) | *Windows-only*: transport minifilter (`FilterGetMessage`/`Reply`/`Send`) |
+| `ringbuf` | [ringbuf.rs](../endpoint_service/src/ringbuf.rs) | **Đặc tả** layout + giao thức commit của ring; thuần Rust nên test được mọi nền tảng |
+| `ring` | [ring.rs](../endpoint_service/src/ring.rs) | *Windows-only*: transport mặc định — ring + doorbell; port cho control/verdict |
+| `winport` | [winport.rs](../endpoint_service/src/winport.rs) | *Windows-only*: transport cũ (1 `FltSendMessage`/event), giữ làm fallback `--transport=port` |
 
 ### 2.3 Luồng xử lý một batch (end-to-end)
 Qua [`Service::process_batch`](../endpoint_service/src/lib.rs):
@@ -112,9 +121,13 @@ TotalSize : u32   (gồm cả header 8B)
 Version   : u16   (= 2, WIRE_VERSION)
 Count     : u16   (15 bit thấp = số record; bit 0x8000 = FRAME_REPLY_EXPECTED)
 ```
-Driver ship mỗi event ngay khi xảy ra (không batching) ⇒ `Count = 1`; format vẫn cho nhiều
-record/frame (replay dump gói nhiều). Bit `FRAME_REPLY_EXPECTED` bật ⇔ frame đi đường
-enforcement đồng bộ, driver đang **chặn** đợi verdict.
+Driver ship mỗi event ngay khi xảy ra ⇒ `Count = 1`; format vẫn cho nhiều record/frame
+(replay dump gói nhiều). Bit `FRAME_REPLY_EXPECTED` bật ⇔ frame đi đường enforcement đồng
+bộ, driver đang **chặn** đợi verdict (khớp bằng `ReqId`, xem §3.2).
+
+Frame header sống sót nguyên vẹn qua việc đổi transport nhờ một trùng hợp có chủ đích:
+`TotalSize` nằm ở offset 0 nên **kiêm luôn cờ commit của ring** (0 = đã reserve nhưng chưa
+commit). Nhờ vậy `parse_batch` đọc thẳng slot ring, và file replay không hỏng.
 
 ### 3.2 Record header — 32 byte (mọi field căn chỉnh tự nhiên)
 | Offset | Size | Field | Mô tả |
@@ -124,7 +137,7 @@ enforcement đồng bộ, driver đang **chặn** đợi verdict.
 | 5 | 3 | *Reserved* | zero |
 | 8 | 8 | `TimeStamp` i64 | FILETIME (100-ns từ 1601) |
 | 16 | 4 | `ProcessId` u32 | pid tiến trình đang hành động |
-| 20 | 4 | *Reserved* | zero — đệm để `ProcessCreateTime` rơi vào offset bội số 8 |
+| 20 | 4 | `ReqId` u32 | id yêu cầu enforce — chỉ có nghĩa khi frame bật `FRAME_REPLY_EXPECTED`; 0 với mọi telemetry. Trước đây là *Reserved* zero-fill nên replay dump cũ vẫn decode nguyên vẹn |
 | 24 | 8 | `ProcessCreateTime` i64 | create time (identity, chống pid-reuse) |
 
 > Các đoạn *Reserved* là **đệm căn chỉnh tự nhiên**: giữ field 8-byte ở offset bội số 8, và
@@ -187,14 +200,22 @@ cả actor lẫn target ⇒ service **không cần bảng pid→start-time**.
 
 ## 5. Thành phần: control-plane (service → sensor) — [control.rs](../endpoint_service/src/control.rs)
 
-Ngược chiều telemetry: service đẩy lệnh arm/disarm **xuống** cổng control của driver để chỉ
-`(process identity, op)` sát chokepoint mới đi đường `FltSendMessage`-with-reply.
+Ngược chiều telemetry: service đẩy lệnh arm/disarm **xuống** cổng của driver để chỉ
+`(process identity, op)` sát chokepoint mới đi đường enforce đồng bộ. Đây là **toàn bộ**
+kênh user→kernel — nó vẫn là message chứ không phải ring thứ hai, vì kernel không có thread
+nào ngồi chờ ring: làm vậy sẽ phải dựng lại đúng worker thread vừa xoá, và chèn thêm một
+thread hop vào đúng đường verdict (nơi đang có thread bị block trong kernel).
 
-### 5.1 Control record — 16 byte, cố định
+### 5.1 Control record — 16 byte, cố định (mọi kind)
 ```
 Kind:u8 (1=Arm, 2=Disarm, 3=SetSelf) ++ Op:u8 ++ pad[2]
   ++ Pid:u32le ++ PidStartMs:u64le
+
+Kind=4 RegisterRing : ++ pad[3] ++ RingBytes:u32le ++ DoorbellHandle:u64le
+Kind=5 Verdict      : ++ Deny:u8 ++ pad[2] ++ ReqId:u32le ++ pad[8]
 ```
+Mọi kind đều **đúng 16 byte** nên driver giữ được vòng parse phẳng (`len % 16 == 0`) —
+service không bao giờ gửi địa chỉ xuống, nên không cần record dài thay đổi.
 - `PidStartMs` = create time cùng **engine-millisecond** với telemetry (FILETIME/10_000);
   driver khớp arm theo `pid` + create time (ms) ⇒ pid tái dùng không thừa hưởng arm cũ.
 - Chỉ **process identity** enforce được trong kernel; `encode()` trả `None` cho identity khác.
@@ -203,8 +224,16 @@ Kind:u8 (1=Arm, 2=Disarm, 3=SetSelf) ++ Op:u8 ++ pad[2]
 
 ### 5.2 `SetSelf` — [`encode_set_self`](../endpoint_service/src/control.rs)
 Lúc kết nối, service **đăng ký pid của chính nó** để driver **miễn trừ** enforcement — một
-sync-enforce tự kích sẽ deadlock (xem EnforcementPlane.md). Gửi qua `push_control` ngay trong
-[`WinPortSource::connect`](../endpoint_service/src/winport.rs).
+sync-enforce tự kích sẽ deadlock (xem EnforcementPlane.md). Gửi ngay trong
+[`RingSource::connect`](../endpoint_service/src/ring.rs), **trước** khi xin ring.
+
+### 5.3 `RegisterRing` / `Verdict` — [ring.rs](../endpoint_service/src/ring.rs)
+- `RegisterRing`: service xin ring `RING_BYTES` (1 MiB, power-of-two) và đưa handle doorbell;
+  **driver** cấp non-paged pool, map vào service, trả **user VA qua `lpOutBuffer`** của
+  `FilterSendMessage`. Service không bao giờ gửi địa chỉ xuống — driver nắm cả hai đầu mapping
+  là điều giữ cho một service bị chiếm quyền không lái được ghi kernel (xem `ringbuf.rs`).
+- `Verdict`: trả lời một record ring có `FRAME_REPLY_EXPECTED`, khớp bằng `ReqId`. Đây là
+  **toàn bộ** chi phí syscall của đường enforcement, và nó hiếm.
 
 ---
 
@@ -231,16 +260,37 @@ với ống ship (verdict đã reply trước handoff).
 - Lỗi ghi (reset/timeout) ⇒ **bỏ socket, tự reconnect** (throttle 500ms); telemetry sinh ra
   khi mất kết nối bị drop (bounded). In lỗi kèm **mã OS** để đối chiếu với backend.
 
-### 6.5 Transport Windows — [winport.rs](../endpoint_service/src/winport.rs) (`#[cfg(windows)]`)
+### 6.5 Transport Windows — [ring.rs](../endpoint_service/src/ring.rs) (`#[cfg(windows)]`, mặc định)
+
+Chọn bằng `--transport=ring|port` (mặc định `ring`).
+
+| API | Dùng cho |
+|---|---|
+| `FilterConnectCommunicationPort` | mở `\SnsDrvPort` (control-plane) |
+| `CreateEventW` | doorbell — **auto-reset**: nếu driver rung chuông đúng khe giữa lúc recheck và lúc `Wait`, trạng thái signaled phải *dính lại* |
+| `FilterSendMessage` | control: `SetSelf`, `RegisterRing` (nhận user VA về qua `lpOutBuffer`), `Verdict` |
+| `WaitForSingleObject` | ngủ trên doorbell sau khi spin `SPINS_BEFORE_SLEEP` vòng |
+
+Vòng consumer: spin → `should_sleep()` (công bố `SLEEPING`, **full fence**, kiểm tra lại) →
+`Wait`. `Empty::Uncommitted` (producer đang ghi dở) **không bao giờ** ngủ, chỉ spin/yield.
+Timeout `DOORBELL_WAIT_MS` **không** phải lưới an toàn cho wakeup lỡ — nó chỉ để nổi lên
+kiểm tra khi driver unload lúc ta đang ngủ.
+
+> **Mẫu Dekker.** `should_sleep()` và phía producer đọc `ConsumerState` tạo thành cặp
+> store-X-rồi-load-Y bắt chéo. x86-TSO cho phép đúng một đảo thứ tự này (store còn trong
+> store buffer), và release/acquire **không đủ** — trên x86 cả hai chỉ là `MOV` trần. Thiếu
+> full fence ở **cả hai phía** ⇒ mất wakeup ⇒ treo ngẫu nhiên. Chi tiết + chứng minh:
+> [ringbuf.rs](../endpoint_service/src/ringbuf.rs).
+
+### 6.6 Transport cũ — [winport.rs](../endpoint_service/src/winport.rs) (`--transport=port`)
+Một `FltSendMessage`/event. Giữ lại làm fallback cho driver chưa có ring.
 | API fltlib | Dùng cho |
 |---|---|
-| `FilterConnectCommunicationPort` | mở `\SnsDrvPort` |
 | `FilterGetMessage` | nhận batch (đồng bộ, `OVERLAPPED=NULL`) vào `buf` dùng lại |
 | `FilterReplyMessage` | trả verdict 1 byte (0/1) kèm `MessageId` |
-| `FilterSendMessage` | đẩy control frame (arm/SetSelf) — kèm `lpBytesReturned` thật (tránh fault) |
 
 `FILTER_MESSAGE_HEADER` 16B (`ReplyLength` + `MessageId`); payload bắt đầu ngay sau, mở đầu
-bằng `TotalSize`. `BUF = 512 KiB + 16` khớp `SERIALIZED_BUFFER_SIZE` của driver.
+bằng `TotalSize`.
 
 ---
 

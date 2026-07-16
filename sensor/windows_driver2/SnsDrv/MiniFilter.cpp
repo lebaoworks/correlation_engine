@@ -16,6 +16,9 @@ static Event::EventNotifyCallback GlobalEventCallback = nullptr;
 static Event::SyncEnforceCallback GlobalEnforce = nullptr;
 static Arm::Table* GlobalArms = nullptr;
 static PFLT_FILTER GlobalFilter = NULL;   // for FltAllocateContext on the write path
+// The shared telemetry ring. Registered/unregistered on the port's connect and
+// disconnect, and reached from the control path (both live in this file).
+static Ring::Buffer* GlobalRing = nullptr;
 #pragma data_seg()
 
 
@@ -108,11 +111,10 @@ namespace MiniFilter
             return FLT_PREOP_SUCCESS_NO_CALLBACK;
         defer{ FltReleaseFileNameInformation(name_info); };
 
-        auto result = krn::make<Event::FileWriteEvent>();
-        if (result.status() != STATUS_SUCCESS)
-            return FLT_PREOP_SUCCESS_NO_CALLBACK;
-
-        auto& event = result.value();
+        // On the stack: both sinks serialize into the ring before returning, so the
+        // event never outlives this frame. That is one pool allocation per event
+        // gone (the old path had to heap-allocate it to hand to the worker queue).
+        Event::FileWriteEvent event;
         // Acting identity (pid + create time) is filled by the base Event ctor.
         event.FileName = name_info->Name;
 
@@ -128,7 +130,7 @@ namespace MiniFilter
             GlobalArms->IsArmed(pid, start_ms, Arm::OP_WRITE))
         {
             bool deny = false;
-            GlobalEnforce(event, &deny); // sync send also delivers to the engine
+            GlobalEnforce(event, &deny); // publishes to the ring and waits for the verdict
             if (deny)
             {
                 Data->IoStatus.Status = STATUS_ACCESS_DENIED;
@@ -137,10 +139,9 @@ namespace MiniFilter
                 return FLT_PREOP_COMPLETE; // block the write
             }
         }
-        else
+        else if (GlobalEventCallback != nullptr)
         {
-            krn::unique_ptr<Event::Event> evt(result.release());
-            GlobalEventCallback(evt); // async telemetry
+            GlobalEventCallback(event); // async telemetry
         }
         return FLT_PREOP_SUCCESS_NO_CALLBACK;
     }
@@ -283,11 +284,10 @@ namespace MiniFilter
 {
     struct PortCookie : public krn::tag<'EVT0'>
     {
-        Port::ConnectNotifyCallback ConnectNotify;
         PFLT_FILTER Filter;
         Arm::Table* ArmTable;
-        PortCookie(Port::ConnectNotifyCallback ConnectNotify, PFLT_FILTER Filter, Arm::Table* ArmTable)
-            : ConnectNotify(ConnectNotify), Filter(Filter), ArmTable(ArmTable) {}
+        PortCookie(PFLT_FILTER Filter, Arm::Table* ArmTable)
+            : Filter(Filter), ArmTable(ArmTable) {}
     };
 
     // Safely copy `len` bytes from a user-mode buffer. Isolated (no C++ unwinding
@@ -307,10 +307,34 @@ namespace MiniFilter
             return STATUS_ACCESS_VIOLATION;
         }
     }
+
+    // Ditto, outbound: used to hand the ring's mapped address back to the service.
+    // Also isolated — a caller holding a `defer` cannot host SEH (C2712).
+    static NTSTATUS SafeCopyOut(_Out_writes_bytes_all_(len) PVOID dst, _In_reads_bytes_(len) const void* src, _In_ ULONG len)
+    {
+        __try
+        {
+            ProbeForWrite(dst, len, 1);
+            RtlCopyMemory(dst, src, len);
+            return STATUS_SUCCESS;
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            return STATUS_ACCESS_VIOLATION;
+        }
+    }
     #pragma warning(pop)
 
-    // Control-plane sink: the service pushes ARM/DISARM/SetSelf records here via
-    // FilterSendMessage. Layout mirrors service/src/control.rs (16-byte records).
+    // Control-plane sink: the service pushes ARM/DISARM/SetSelf/RegisterRing/Verdict
+    // records here via FilterSendMessage. Layout mirrors endpoint_service/src/
+    // control.rs — every kind is exactly 16 bytes, so this stays a flat loop.
+    //
+    // This is the *whole* user→kernel channel. It stays a message channel rather
+    // than a second ring because the kernel has no thread waiting on one: a down-ring
+    // would mean re-introducing the very worker thread the ring deleted, and it would
+    // add a thread hop to the verdict path — the one path where a thread is already
+    // blocked in the kernel waiting. The traffic here is a few records a second
+    // against millions of events a second going the other way.
     _IRQL_requires_max_(APC_LEVEL)
     static NTSTATUS FLTAPI ControlMessageNotify(
         _In_ PVOID PortCookie_,
@@ -320,12 +344,17 @@ namespace MiniFilter
         _In_ ULONG OutputBufferLength,
         _Out_ PULONG ReturnOutputBufferLength)
     {
-        UNREFERENCED_PARAMETER(OutputBuffer);
-        UNREFERENCED_PARAMETER(OutputBufferLength);
         *ReturnOutputBufferLength = 0;
 
         constexpr ULONG REC = 16;
         constexpr ULONG MAX_BYTES = REC * 512; // bound one control frame
+
+        // Control kinds — must match endpoint_service/src/control.rs.
+        constexpr BYTE C_ARM = 1;
+        constexpr BYTE C_DISARM = 2;
+        constexpr BYTE C_SET_SELF = 3;
+        constexpr BYTE C_REGISTER_RING = 4;
+        constexpr BYTE C_VERDICT = 5;
 
         // Filter Manager hands this callback the *connection* cookie (set by
         // FilterConnectNotify to the client PFLT_PORT), NOT the server PortCookie.
@@ -350,6 +379,7 @@ namespace MiniFilter
         if (SafeCopyIn(local, InputBuffer, len) != STATUS_SUCCESS)
             return STATUS_ACCESS_VIOLATION;
 
+        NTSTATUS status = STATUS_SUCCESS;
         for (ULONG off = 0; off + REC <= len; off += REC)
         {
             BYTE   kind = local[off + 0];
@@ -358,21 +388,67 @@ namespace MiniFilter
             INT64  start_ms = *(INT64*)(local + off + 8);
             switch (kind)
             {
-            case 1: GlobalArms->Arm(pid, start_ms, op); break;      // C_ARM
-            case 2: GlobalArms->Disarm(pid, start_ms); break;       // C_DISARM
-            case 3: GlobalArms->SetServicePid(pid); break;          // C_SET_SELF
-            default: break;                                              // unknown → skip
+            case C_ARM:      GlobalArms->Arm(pid, start_ms, op); break;
+            case C_DISARM:   GlobalArms->Disarm(pid, start_ms); break;
+            case C_SET_SELF: GlobalArms->SetServicePid(pid); break;
+
+            case C_REGISTER_RING:
+            {
+                // { pad[3], RingBytes:u32 @4, DoorbellHandle:u64 @8 }. We run in the
+                // service's context here, which is exactly what the mapping and the
+                // handle reference both require.
+                if (GlobalRing == nullptr)
+                {
+                    status = STATUS_DEVICE_NOT_READY;
+                    break;
+                }
+                ULONG  ring_bytes = *(UINT32*)(local + off + 4);
+                HANDLE doorbell = (HANDLE)(ULONG_PTR)(*(UINT64*)(local + off + 8));
+
+                PVOID mapped = nullptr;
+                status = GlobalRing->Register(ring_bytes, doorbell, &mapped);
+                if (status != STATUS_SUCCESS)
+                    break;
+
+                // Reply with the mapped address. The service never sends an address
+                // down — the driver owning both ends of the mapping is what keeps a
+                // compromised service from steering a kernel write (see Ring.hpp).
+                if (OutputBuffer == nullptr || OutputBufferLength < sizeof(UINT64))
+                {
+                    GlobalRing->Unregister();
+                    status = STATUS_BUFFER_TOO_SMALL;
+                    break;
+                }
+                UINT64 addr = (UINT64)(ULONG_PTR)mapped;
+                status = SafeCopyOut(OutputBuffer, &addr, sizeof(addr));
+                if (status != STATUS_SUCCESS)
+                {
+                    // The service cannot learn where the ring is, so it can never
+                    // drain it — tear the mapping down rather than leak it.
+                    GlobalRing->Unregister();
+                    break;
+                }
+                *ReturnOutputBufferLength = sizeof(UINT64);
+                break;
+            }
+
+            case C_VERDICT:
+            {
+                // { Deny:u8 @1, pad[2], ReqId:u32 @4 }. Wakes the callback thread
+                // blocked in Ring::EnforceSync. An unknown ReqId is not an error —
+                // the waiter may have already timed out and failed open.
+                if (GlobalRing == nullptr)
+                    break;
+                UINT32 req_id = *(UINT32*)(local + off + 4);
+                GlobalRing->CompleteVerdict(req_id, op != 0);
+                break;
+            }
+
+            default: break; // unknown → skip
             }
         }
-        return STATUS_SUCCESS;
+        return status;
     }
-    struct Cookie : public krn::tag<'EVT0'>
-    {
-        PFLT_FILTER Filter;
-        PFLT_PORT   ClientPort = NULL;
-        Cookie(PFLT_FILTER Filter, PFLT_PORT Port) : Filter(Filter), ClientPort(Port) {}
-    };
-
     _IRQL_requires_(PASSIVE_LEVEL)
     _IRQL_requires_same_
     NTSTATUS FLTAPI FilterConnectNotify(
@@ -384,23 +460,15 @@ namespace MiniFilter
     {
         UNREFERENCED_PARAMETER(ConnectionContext);
         UNREFERENCED_PARAMETER(SizeOfContext);
+        UNREFERENCED_PARAMETER(ServerPortCookie);
 
         TraceEvents(TRACE_LEVEL_INFORMATION, TRACE_DRIVER, "MiniPort: Client connected: %p", ClientPort);
 
-        // Set Port as connection cookie to be used in disconnect 
+        // The client port is all we need to remember: the ring is set up later, by
+        // the service's C_REGISTER_RING, because the mapping must happen in the
+        // service's context and this callback is the wrong place to demand a size.
         *ConnectionCookie = ClientPort;
-
-        // Retrieve port cookie to get filter and connect notify callback
-        auto portCookie = reinterpret_cast<PortCookie*>(ServerPortCookie);
-
-        // Create a connection object to represent this connection, which will be freed on disconnect.
-        auto connection =  krn::make<Connection>(portCookie->Filter, ClientPort);
-        if (connection.status() != STATUS_SUCCESS)
-        {
-            TraceEvents(TRACE_LEVEL_ERROR, TRACE_DRIVER, "MiniPort: Create Connection failed -> Status: %!STATUS!", connection.status());
-            return connection.status();
-        }
-        return portCookie->ConnectNotify(connection);
+        return STATUS_SUCCESS;
     }
 
     _IRQL_requires_(PASSIVE_LEVEL)
@@ -409,21 +477,35 @@ namespace MiniFilter
     {
         auto ClientPort = reinterpret_cast<PFLT_PORT>(ConnectionCookie);
         TraceEvents(TRACE_LEVEL_INFORMATION, TRACE_DRIVER, "MiniPort: Client disconnected: %p", ClientPort);
+
+        // The service is gone, so its ring mapping must go with it. This waits out
+        // any producer still inside a publish before freeing anything. Callbacks that
+        // fire after this point find no ring and fall through as no-ops; enforcement
+        // fails open.
+        if (GlobalRing != nullptr)
+            GlobalRing->Unregister();
+
+        FltCloseClientPort(GlobalFilter, &ClientPort);
     }
 
     _IRQL_requires_(PASSIVE_LEVEL)
     _IRQL_requires_same_
     Port::Port(
-        _In_ const Filter&          Filter,
-        _In_ UNICODE_STRING*        PortName,
-        _In_ ConnectNotifyCallback  ConnectNotifyCallback,
-        _In_ Arm::Table&            ArmTable
+        _In_ const Filter&   Filter,
+        _In_ UNICODE_STRING* PortName,
+        _In_ Arm::Table&     ArmTable,
+        _In_ Ring::Buffer&   RingBuffer
     ) noexcept
     {
         auto& status = failable::_status;
 
+        // Publish the ring for the control path (C_REGISTER_RING / C_VERDICT) and
+        // for disconnect. Both live in this file, so a global is the honest shape —
+        // FltMgr gives the message callback the *connection* cookie, not this one.
+        GlobalRing = &RingBuffer;
+
         // Create port cookie
-        auto result = krn::make<PortCookie>(ConnectNotifyCallback, Filter._filter, &ArmTable);
+        auto result = krn::make<PortCookie>(Filter._filter, &ArmTable);
         status = result.status();
         if (status != STATUS_SUCCESS)
         {
@@ -465,6 +547,8 @@ namespace MiniFilter
         }
     }
 
+    _IRQL_requires_(PASSIVE_LEVEL)
+    _IRQL_requires_same_
     Port::~Port()
     {
         if (this->status() != STATUS_SUCCESS)
@@ -472,56 +556,6 @@ namespace MiniFilter
 
         FltCloseCommunicationPort(_port);
         delete reinterpret_cast<PortCookie*>(_cookie);
-    }
-}
-
-// Connection
-namespace MiniFilter
-{
-    Connection::Connection(
-        _In_ PFLT_FILTER Filter,
-        _In_ PFLT_PORT   Port) noexcept : _filter(Filter), _port(Port) {}
-
-    Connection::~Connection()
-    {
-        FltCloseClientPort(_filter, &_port);
-    }
-
-    NTSTATUS Connection::Send(
-        _In_reads_bytes_(BufferSize) PVOID Buffer,
-        _In_ ULONG BufferSize) noexcept
-    {
-        // Use a relative timeout
-        // A negative LARGE_INTEGER represents relative time in 100-nanosecond units.
-        LARGE_INTEGER timeout;
-        timeout.QuadPart = -5 * 1000 * 1000 * 10; // 5 seconds
-
-        return FltSendMessage(_filter, &_port, Buffer, BufferSize, NULL, 0, &timeout);
-    }
-
-    _IRQL_requires_max_(APC_LEVEL)
-    NTSTATUS Connection::SendWithReply(
-        _In_reads_bytes_(BufferSize) PVOID Buffer,
-        _In_ ULONG BufferSize,
-        _Out_ bool* Deny) noexcept
-    {
-        *Deny = false;
-
-        // Bounded stall: enforcement holds the operation until the service replies
-        // with a single decision byte (1 = deny). On timeout or error we fail open
-        // (leave *Deny = false) so a slow/absent service can never wedge the system.
-        // 20 ms was too tight — the service round-trips through the engine (and,
-        // before it was reordered, the backend TCP hop) before replying, so it
-        // routinely overran and the enforce failed open. 1 s is ample headroom; the
-        // common case still replies in well under a millisecond, so no real stall.
-        LARGE_INTEGER timeout;
-        timeout.QuadPart = -1000 * 1000 * 10; // 1 s
-
-        BYTE  verdict = 0;
-        ULONG reply_size = sizeof(verdict);
-        NTSTATUS status = FltSendMessage(_filter, &_port, Buffer, BufferSize, &verdict, &reply_size, &timeout);
-        if (status == STATUS_SUCCESS && reply_size >= sizeof(verdict) && verdict != 0)
-            *Deny = true;
-        return status;
+        GlobalRing = nullptr;
     }
 }

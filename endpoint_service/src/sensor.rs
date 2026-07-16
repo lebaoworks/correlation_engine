@@ -7,10 +7,9 @@
 //! target (no pid→start-time table needed); records are `Size`-prefixed and
 //! padded to 8 bytes so unknown types are skipped, not fatal.
 //!
-//! The driver ships every event **immediately as it occurs** (no batching, so
-//! detection latency is one queue hop): one port message = one frame carrying
-//! one record (`Count` = 1). The format still allows several records per frame;
-//! the parser handles both (replay files may pack many records into one frame).
+//! The driver ships every event **immediately as it occurs**: one frame carries one
+//! record (`Count` = 1). The format still allows several records per frame; the
+//! parser handles both (replay files may pack many records into one frame).
 //!
 //! ```text
 //! frame  = TotalSize:u32le (incl. this 8-byte header) ++ Version:u16le(=2)
@@ -18,10 +17,22 @@
 //! record = Size:u32le (incl. 32-byte header, multiple of 8)
 //!          ++ Type:u8 ++ pad[3]
 //!          ++ TimeStamp:i64le (FILETIME, 100-ns since 1601)
-//!          ++ Pid:u32le ++ pad[4] ++ PidCreateTime:i64le      <- acting identity
+//!          ++ Pid:u32le ++ ReqId:u32le ++ PidCreateTime:i64le  <- acting identity
 //!          ++ type-specific body (fixed) ++ strings ++ pad to 8
 //! string = Length:u16le (bytes) ++ Buffer (UTF-16LE)
 //! ```
+//!
+//! `ReqId` (offset 20, formerly reserved-and-zeroed) is meaningful only when the
+//! frame is tagged [`FRAME_REPLY_EXPECTED`]; it names the kernel thread blocked
+//! waiting for the verdict, which the service answers with a
+//! `control::encode_verdict` record. Older producers zero-filled this field and
+//! never set the frame flag, so replay files and `--demo` keep decoding unchanged.
+//!
+//! # Transport
+//!
+//! These frames arrive over the shared-memory ring (`ringbuf`), which is why the
+//! frame header survived the transport change intact: its first field `TotalSize`
+//! doubles as the ring's commit flag, so `parse_batch` reads a ring slot directly.
 //!
 //! Per-type body at offset 32 (see `Event.hpp` for the authoritative tables):
 //! * `FileOpen`          — strings: FileName  (capture disabled for now)
@@ -46,6 +57,10 @@ pub const RECORD_HEADER: usize = 32;
 /// no reply. The low 15 bits hold the real record count.
 pub const FRAME_REPLY_EXPECTED: u16 = 0x8000;
 const COUNT_MASK: u16 = 0x7fff;
+
+/// `ReqId` offset within a record header. Only meaningful with
+/// [`FRAME_REPLY_EXPECTED`]; zero otherwise.
+const O_REQ_ID: usize = 20;
 
 pub const T_FILE_OPEN: u8 = 1;
 pub const T_FILE_WRITE: u8 = 2;
@@ -318,6 +333,28 @@ pub fn enc_remote_thread(
 /// Does this frame want a verdict reply (was it sent on the enforcement path)?
 pub fn expects_reply(payload: &[u8]) -> bool {
     payload.len() >= BATCH_HEADER && (u16_at(payload, 6) & FRAME_REPLY_EXPECTED) != 0
+}
+
+/// The enforce request id of a [`FRAME_REPLY_EXPECTED`] frame — the token that ties
+/// the verdict back to the kernel thread blocked on it. Read from the *first*
+/// record: the driver publishes exactly one record per enforce frame, since the
+/// thread it blocks is enforcing exactly one operation.
+///
+/// Returns 0 for frames too short to carry a record, which no producer ever tags.
+pub fn req_id(payload: &[u8]) -> u32 {
+    if payload.len() < BATCH_HEADER + RECORD_HEADER {
+        return 0;
+    }
+    u32_at(payload, BATCH_HEADER + O_REQ_ID)
+}
+
+/// Wrap one record into an enforcement frame tagged for reply and carrying `req_id`.
+/// The driver builds this in `Ring.cpp`; here it documents the layout and lets the
+/// tests round-trip it.
+pub fn build_enforce_frame(record: &[u8], req_id: u32) -> Vec<u8> {
+    let mut v = build_frame(&[record.to_vec()], true);
+    v[BATCH_HEADER + O_REQ_ID..BATCH_HEADER + O_REQ_ID + 4].copy_from_slice(&req_id.to_le_bytes());
+    v
 }
 
 /// Wrap serialized records into one telemetry frame (async, no reply expected).

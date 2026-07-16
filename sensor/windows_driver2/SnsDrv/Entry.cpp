@@ -10,7 +10,7 @@
 
 // Functional
 #include "MiniFilter.hpp"
-#include "Worker.hpp"
+#include "Ring.hpp"
 #include "Callbacks.hpp"
 #include "WPF.hpp"
 #include "ArmTable.hpp"
@@ -39,21 +39,30 @@ struct Driver;
 
 #pragma data_seg("NONPAGED")
 static Driver* GlobalDriver = nullptr;
-static Worker::Queue* GlobalQueue = nullptr;
-static Worker::Worker* GlobalWorker = nullptr;
+static Ring::Buffer* GlobalRingBuffer = nullptr;
 static Arm::Table* GlobalArmTable = nullptr;
 #pragma data_seg()
 
-// Enforcement facade handed to the monitors: route a sync-enforce request to the
-// worker, which owns the live connection. Capture-less lambda → function pointer.
+// Telemetry sink handed to the monitors: serialize straight into the shared ring.
+// No queue, no worker thread, no allocation — the callback returns as soon as the
+// bytes are in the slot. Capture-less lambda → function pointer.
+static NTSTATUS TelemetryThunk(const Event::Event& evt)
+{
+    if (GlobalRingBuffer == nullptr)
+        return STATUS_PORT_DISCONNECTED;
+    return GlobalRingBuffer->PublishTelemetry(evt);
+}
+
+// Enforcement facade: publish reply-expected and block for the service's verdict.
+// Fails open if there is no ring (no service) — see Ring::EnforceSync.
 static NTSTATUS EnforceThunk(const Event::Event& evt, bool* deny)
 {
-    if (GlobalWorker == nullptr)
+    if (GlobalRingBuffer == nullptr)
     {
         *deny = false;
         return STATUS_PORT_DISCONNECTED;
     }
-    return GlobalWorker->EnforceSync(evt, deny);
+    return GlobalRingBuffer->EnforceSync(evt, deny);
 }
 
 /*********************
@@ -65,8 +74,7 @@ struct Driver : public krn::failable, public krn::tag<'EVT0'>
 private:
     MiniFilter::Filter* _filter = nullptr;
     MiniFilter::Port*   _port   = nullptr;
-    Worker::Queue*      _queue  = nullptr;
-    Worker::Worker*     _worker = nullptr;
+    Ring::Buffer*       _ring   = nullptr;
     Process::Monitor*   _monitor = nullptr;
     WPF::Monitor*       _netmon = nullptr;
     Arm::Table*         _armtable = nullptr;
@@ -90,39 +98,25 @@ public:
         defer{ if (status != STATUS_SUCCESS) { delete _armtable; _armtable = nullptr; } };
         GlobalArmTable = _armtable;
 
-        // Initialize Queue
+        // Initialize the shared telemetry ring. It holds no memory until the service
+        // connects and asks for it (C_REGISTER_RING); until then every publish is a
+        // cheap no-op and enforcement fails open.
         {
-            auto result = krn::make<Worker::Queue>();
+            auto result = krn::make<Ring::Buffer>();
             status = result.status();
             if (status != STATUS_SUCCESS)
             {
-                TraceEvents(TRACE_LEVEL_ERROR, TRACE_DRIVER, "Initialized Queue -> status: %!STATUS!", status);
+                TraceEvents(TRACE_LEVEL_ERROR, TRACE_DRIVER, "Initialized Ring -> status: %!STATUS!", status);
                 return;
             }
-            _queue = result.release();
+            _ring = result.release();
         }
-        defer{ if (status != STATUS_SUCCESS) { delete _queue; _queue = nullptr; } };
-        GlobalQueue = _queue; // Store in global for callback access
-
-        // Initialize Worker
-        {
-            auto result = krn::make<Worker::Worker>(*_queue, *_armtable);
-            status = result.status();
-            if (status != STATUS_SUCCESS)
-            {
-                TraceEvents(TRACE_LEVEL_ERROR, TRACE_DRIVER, "Initialized Worker -> status: %!STATUS!", status);
-                return;
-            }
-            _worker = result.release();
-        }
-        defer{ if (status != STATUS_SUCCESS) { delete _worker; _worker = nullptr; } };
-        GlobalWorker = _worker; // Store in global for callback access
+        defer{ if (status != STATUS_SUCCESS) { delete _ring; _ring = nullptr; } };
+        GlobalRingBuffer = _ring; // Store in global for callback access
 
         // Initialize MiniFilter
         {
-            auto result = krn::make<MiniFilter::Filter>(DriverObject, [](krn::unique_ptr<Event::Event>& evt) -> NTSTATUS {
-                return GlobalQueue->Push(evt);
-            }, *_armtable, EnforceThunk);
+            auto result = krn::make<MiniFilter::Filter>(DriverObject, TelemetryThunk, *_armtable, EnforceThunk);
             status = result.status();
             if (status != STATUS_SUCCESS)
             {
@@ -133,12 +127,11 @@ public:
         }
         defer{ if (status != STATUS_SUCCESS) { delete _filter; _filter = nullptr; } };
 
-        // Create MiniPort object
+        // Create MiniPort object — the control plane only (arm/disarm, ring
+        // registration, verdicts). Telemetry never goes through it.
         {
    	        UNICODE_STRING port_name = RTL_CONSTANT_STRING(L"\\SnsDrvPort");
-   	        auto result = krn::make<MiniFilter::Port>(*_filter, &port_name, [](krn::unique_ptr<MiniFilter::Connection>& conn) -> NTSTATUS {
-                return GlobalWorker->ConnectNotify(conn);
-            }, *_armtable);
+   	        auto result = krn::make<MiniFilter::Port>(*_filter, &port_name, *_armtable, *_ring);
    	        status = result.status();
             if (status != STATUS_SUCCESS)
             {
@@ -151,9 +144,7 @@ public:
 
         // Initialize Process Monitor
         {
-            auto result = krn::make<Process::Monitor>([](krn::unique_ptr<Event::Event>& evt) -> NTSTATUS {
-                return GlobalQueue->Push(evt);
-            }, *_armtable, EnforceThunk);
+            auto result = krn::make<Process::Monitor>(TelemetryThunk, *_armtable, EnforceThunk);
             status = result.status();
             if (status != STATUS_SUCCESS)
             {
@@ -164,11 +155,15 @@ public:
         }
         defer{ if (status != STATUS_SUCCESS) { delete _monitor; _monitor = nullptr; } };
 
-        // Initialize Network Monitor
+        // Network Monitor — DISABLED. Its WFP ALE_AUTH_CONNECT callout currently
+        // emits NO events (only PERMIT + verbose trace), so it is pure dead weight,
+        // and a loaded WFP callout is the prime suspect for the loopback TCP resets
+        // (os 10053/10054) seen on the endpoint↔backend link — the transport is stable
+        // on a clean host (see `--stress`). Re-enable only once the callout actually
+        // ships events AND exempts loopback / handles classify rights correctly.
+#if 0
         {
-            auto result = krn::make<WPF::Monitor>(DriverObject, [](krn::unique_ptr<Event::Event>& evt) -> NTSTATUS {
-                return GlobalQueue->Push(evt);
-                });
+            auto result = krn::make<WPF::Monitor>(DriverObject, TelemetryThunk);
             status = result.status();
             if (status != STATUS_SUCCESS)
             {
@@ -178,6 +173,7 @@ public:
             _netmon = result.release();
         }
         defer{ if (status != STATUS_SUCCESS) { delete _netmon; _netmon = nullptr; } };
+#endif
     }
 
     ~Driver()
@@ -188,9 +184,11 @@ public:
         delete _port;   // Stop accepting new connections (also stops control pushdown)
         delete _monitor; // Stop process callbacks (they consult the arm table / enforce)
         delete _netmon; // Stop monitoring network events
-        delete _worker; // Stop worker thread and cleanup existing connection
         delete _filter; // Close the filter => stop accepting new events
-        delete _queue;  // Cleanup event queue
+        // Only now can the ring go: its destructor unregisters, which waits out any
+        // producer still mid-publish. Every source of publishes is stopped above.
+        GlobalRingBuffer = nullptr; // the thunks test this; never leave it dangling
+        delete _ring;
         delete _armtable; // Last: everything that referenced it is now gone
     }
 };

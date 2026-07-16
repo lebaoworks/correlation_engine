@@ -1,0 +1,14 @@
+# Kernel images must be built for the MSVC target and cannot use the prebuilt std
+# (there is no std in the kernel) — build core/alloc from source.
+[build]
+target = "x86_64-pc-windows-msvc"
+
+[unstable]
+build-std = ["core", "alloc"]
+
+# windows-drivers-rs requires the static CRT for a driver image; wdk-build refuses
+# to configure otherwise (StaticCrtNotEnabled). The driver-specific link args
+# (/INTEGRITYCHECK, subsystem, DriverEntry, /NODEFAULTLIB, …) are injected by
+# wdk-build's `configure_wdk_binary_build`, so we don't set them here.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

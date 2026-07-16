@@ -17,7 +17,7 @@ use std::os::raw::c_void;
 use crate::source::EventSource;
 use log::debug;
 
-type Handle = *mut c_void;
+pub(crate) type Handle = *mut c_void;
 const INVALID_HANDLE: Handle = usize::MAX as Handle;
 
 // FILTER_MESSAGE_HEADER { ULONG ReplyLength; ULONGLONG MessageId; } -> 16 bytes (8-align).
@@ -25,9 +25,11 @@ const MSG_HEADER: usize = 16;
 // Max payload we accept per message (matches driver SERIALIZED_BUFFER_SIZE 512 KB).
 const BUF: usize = 512 * 1024 + MSG_HEADER;
 
+// Shared with `ring`, which reuses the port for the control plane (registration and
+// verdicts) while its telemetry comes from shared memory.
 #[link(name = "fltlib")]
 extern "system" {
-    fn FilterConnectCommunicationPort(
+    pub(crate) fn FilterConnectCommunicationPort(
         lpPortName: *const u16,
         dwOptions: u32,
         lpContext: *const c_void,
@@ -42,7 +44,7 @@ extern "system" {
         lpOverlapped: *mut c_void,
     ) -> i32;
     fn FilterReplyMessage(hPort: Handle, lpReplyBuffer: *const c_void, dwReplyBufferSize: u32) -> i32;
-    fn FilterSendMessage(
+    pub(crate) fn FilterSendMessage(
         hPort: Handle,
         lpInBuffer: *const c_void,
         dwInBufferSize: u32,
@@ -53,7 +55,14 @@ extern "system" {
 }
 #[link(name = "kernel32")]
 extern "system" {
-    fn CloseHandle(h: Handle) -> i32;
+    pub(crate) fn CloseHandle(h: Handle) -> i32;
+    pub(crate) fn CreateEventW(
+        lpEventAttributes: *const c_void,
+        bManualReset: i32,
+        bInitialState: i32,
+        lpName: *const u16,
+    ) -> Handle;
+    pub(crate) fn WaitForSingleObject(hHandle: Handle, dwMilliseconds: u32) -> u32;
 }
 
 pub struct WinPortSource {

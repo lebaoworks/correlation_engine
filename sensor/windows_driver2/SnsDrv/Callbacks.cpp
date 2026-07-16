@@ -106,39 +106,36 @@ namespace Process
             {
                 TraceEvents(TRACE_LEVEL_INFORMATION, TRACE_DRIVER, "Process: process handle creation (lsass): ProcessId: %6lu, TargetProcessId: %6lu, DesiredAccess: 0x%08X", pid, target_pid, access);
 
-                auto result = krn::make<Event::ProcessOpenEvent>();
-                if (result.status() == STATUS_SUCCESS)
-                {
-                    auto& event = result.value();
-                    // Acting identity (pid + create time) is filled by the base
-                    // Event ctor from the current process context.
-                    event.TargetProcessId = target_pid;
-                    event.DesiredAccess = access;
-                    event.TargetCreateTime.QuadPart = PsGetProcessCreateTimeQuadPart((PEPROCESS)OperationInformation->Object);
-                    event.TargetImage = *image_path;
+                // On the stack: both sinks serialize into the ring before returning,
+                // so the event never outlives this frame — no pool allocation.
+                Event::ProcessOpenEvent event;
+                // Acting identity (pid + create time) is filled by the base
+                // Event ctor from the current process context.
+                event.TargetProcessId = target_pid;
+                event.DesiredAccess = access;
+                event.TargetCreateTime.QuadPart = PsGetProcessCreateTimeQuadPart((PEPROCESS)OperationInformation->Object);
+                event.TargetImage = *image_path;
 
-                    // An lsass handle-open with sensitive access is the static
-                    // single-step chokepoint (it can't be pre-armed: the first
-                    // matching event *is* the block). Enforce it synchronously —
-                    // unless we're the service itself (self-deadlock guard).
-                    bool exempt = (GlobalArms != nullptr) && GlobalArms->IsServicePid(pid);
-                    if (!exempt && GlobalEnforce != nullptr)
+                // An lsass handle-open with sensitive access is the static
+                // single-step chokepoint (it can't be pre-armed: the first
+                // matching event *is* the block). Enforce it synchronously —
+                // unless we're the service itself (self-deadlock guard).
+                bool exempt = (GlobalArms != nullptr) && GlobalArms->IsServicePid(pid);
+                if (!exempt && GlobalEnforce != nullptr)
+                {
+                    bool deny = false;
+                    GlobalEnforce(event, &deny); // publishes to the ring and waits for the verdict
+                    if (deny)
                     {
-                        bool deny = false;
-                        GlobalEnforce(event, &deny); // sync send also delivers to the engine
-                        if (deny)
-                        {
-                            // Strip the dangerous rights so the returned handle
-                            // cannot read lsass memory — the credential dump fails.
-                            OperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~sensitive_access;
-                            TraceEvents(TRACE_LEVEL_WARNING, TRACE_DRIVER, "Process: DENIED lsass open pid=%lu (stripped access)", pid);
-                        }
+                        // Strip the dangerous rights so the returned handle
+                        // cannot read lsass memory — the credential dump fails.
+                        OperationInformation->Parameters->CreateHandleInformation.DesiredAccess &= ~sensitive_access;
+                        TraceEvents(TRACE_LEVEL_WARNING, TRACE_DRIVER, "Process: DENIED lsass open pid=%lu (stripped access)", pid);
                     }
-                    else
-                    {
-                        krn::unique_ptr<Event::Event> evt(result.release());
-                        GlobalEventCallback(evt); // async telemetry
-                    }
+                }
+                else if (GlobalEventCallback != nullptr)
+                {
+                    GlobalEventCallback(event); // async telemetry
                 }
             }
         }
@@ -177,43 +174,40 @@ namespace Process
             ULONG pid = HandleToUlong(ProcessId);
             TraceEvents(TRACE_LEVEL_INFORMATION, TRACE_DRIVER, "Process: process create: ProcessId: %6lu, ImageName: %wZ", pid, CreateInfo->ImageFileName);
 
-            auto result = krn::make<Event::ProcessCreateEvent>();
-            if (result.status() == STATUS_SUCCESS)
-            {
-                auto& event = result.value();
-                event.TimeStamp.QuadPart = PsGetProcessCreateTimeQuadPart(Process);
-                // Acting identity = the PARENT (may differ from the current
-                // context when the parent handle was spoofed, so look it up).
-                event.ProcessId = HandleToUlong(CreateInfo->ParentProcessId);
-                event.ProcessCreateTime.QuadPart = CreateTimeByPid(CreateInfo->ParentProcessId);
-                event.ChildProcessId = pid;
-                event.ChildCreateTime.QuadPart = event.TimeStamp.QuadPart;
-                event.ImageName = *CreateInfo->ImageFileName;
-                if (CreateInfo->CommandLine)
-                    event.CommandLine = *CreateInfo->CommandLine;
+            // On the stack: both sinks serialize into the ring before returning, so
+            // the event never outlives this frame — no pool allocation.
+            Event::ProcessCreateEvent event;
+            event.TimeStamp.QuadPart = PsGetProcessCreateTimeQuadPart(Process);
+            // Acting identity = the PARENT (may differ from the current
+            // context when the parent handle was spoofed, so look it up).
+            event.ProcessId = HandleToUlong(CreateInfo->ParentProcessId);
+            event.ProcessCreateTime.QuadPart = CreateTimeByPid(CreateInfo->ParentProcessId);
+            event.ChildProcessId = pid;
+            event.ChildCreateTime.QuadPart = event.TimeStamp.QuadPart;
+            event.ImageName = *CreateInfo->ImageFileName;
+            if (CreateInfo->CommandLine)
+                event.CommandLine = *CreateInfo->CommandLine;
 
-                // Multi-step chokepoint (e.g. dropper write→exec): the engine may
-                // have armed the PARENT identity for exec. If so, enforce this spawn
-                // synchronously and deny by failing the creation.
-                UINT32 parent = HandleToUlong(CreateInfo->ParentProcessId);
-                INT64  parent_start_ms = event.ProcessCreateTime.QuadPart / 10000;
-                bool exempt = (GlobalArms != nullptr) && GlobalArms->IsServicePid(parent);
-                if (!exempt && GlobalArms != nullptr && GlobalEnforce != nullptr &&
-                    GlobalArms->IsArmed(parent, parent_start_ms, Arm::OP_EXEC))
+            // Multi-step chokepoint (e.g. dropper write→exec): the engine may
+            // have armed the PARENT identity for exec. If so, enforce this spawn
+            // synchronously and deny by failing the creation.
+            UINT32 parent = HandleToUlong(CreateInfo->ParentProcessId);
+            INT64  parent_start_ms = event.ProcessCreateTime.QuadPart / 10000;
+            bool exempt = (GlobalArms != nullptr) && GlobalArms->IsServicePid(parent);
+            if (!exempt && GlobalArms != nullptr && GlobalEnforce != nullptr &&
+                GlobalArms->IsArmed(parent, parent_start_ms, Arm::OP_EXEC))
+            {
+                bool deny = false;
+                GlobalEnforce(event, &deny); // publishes to the ring and waits for the verdict
+                if (deny)
                 {
-                    bool deny = false;
-                    GlobalEnforce(event, &deny); // sync send also delivers to the engine
-                    if (deny)
-                    {
-                        CreateInfo->CreationStatus = STATUS_ACCESS_DENIED;
-                        TraceEvents(TRACE_LEVEL_WARNING, TRACE_DRIVER, "Process: DENIED spawn by armed parent pid=%lu", parent);
-                    }
+                    CreateInfo->CreationStatus = STATUS_ACCESS_DENIED;
+                    TraceEvents(TRACE_LEVEL_WARNING, TRACE_DRIVER, "Process: DENIED spawn by armed parent pid=%lu", parent);
                 }
-                else
-                {
-                    krn::unique_ptr<Event::Event> evt(result.release());
-                    GlobalEventCallback(evt); // async telemetry
-                }
+            }
+            else if (GlobalEventCallback != nullptr)
+            {
+                GlobalEventCallback(event); // async telemetry
             }
         }
         // Process termination — NOP (log verbose, emit nothing).

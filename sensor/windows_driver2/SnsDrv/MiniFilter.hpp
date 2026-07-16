@@ -9,6 +9,7 @@
 // Events
 #include "Event.hpp"
 #include "ArmTable.hpp"
+#include "Ring.hpp"
 
 /*********************
 *    Declarations    *
@@ -18,7 +19,6 @@ namespace MiniFilter
 {
     class Filter;
     class Port;
-    class Connection;
 }
 
 namespace MiniFilter
@@ -58,11 +58,12 @@ namespace MiniFilter
 
 namespace MiniFilter
 {
+    /// The control port. It carries *only* the control plane now — arm/disarm, ring
+    /// registration and verdicts — because telemetry moved to the shared ring
+    /// (`Ring::Buffer`). Nothing is ever sent kernel→user through it, so there is no
+    /// connection object to keep and no `FltSendMessage` anywhere in the driver.
     class Port : public krn::failable, public krn::tag<'EVT0'>
     {
-    public:
-        using ConnectNotifyCallback = NTSTATUS(*)(krn::unique_ptr<Connection>&);
-
     private:
         PFLT_PORT _port = NULL;
         PVOID     _cookie = nullptr;
@@ -71,60 +72,21 @@ namespace MiniFilter
         /// @brief Creates a communication port for the filter.
         /// @param Filter The filter to which the port will be attached.
         /// @param PortName The name of the port, which will be used by user-mode applications to connect to it.
+        /// @param ArmTable The arm table the control plane pushes into.
+        /// @param RingBuffer The ring registered on C_REGISTER_RING and torn down on disconnect.
         /// @remarks On success, status will be STATUS_SUCCESS.
         /// @remarks On failure, status will be set to the error code, rewind any partial initialization.
         _IRQL_requires_(PASSIVE_LEVEL)
         _IRQL_requires_same_
         Port(
-            _In_ const Filter&          Filter,
-            _In_ UNICODE_STRING*        PortName,
-            _In_ ConnectNotifyCallback  ConnectNotifyCallback,
-            _In_ Arm::Table&            ArmTable
+            _In_ const Filter&   Filter,
+            _In_ UNICODE_STRING* PortName,
+            _In_ Arm::Table&     ArmTable,
+            _In_ Ring::Buffer&   RingBuffer
         ) noexcept;
 
         _IRQL_requires_(PASSIVE_LEVEL)
         _IRQL_requires_same_
         ~Port();
-    };
-
-    class Connection : public krn::tag<'EVT0'>
-    {
-    private:
-        PFLT_FILTER _filter = NULL;
-        PFLT_PORT   _port   = NULL;
-
-    public:
-        /// @brief Wraps a MiniPort connection
-        /// @param Filter The filter to which the port is attached.
-        /// @param ClientPort The port representing the connection to the user-mode application.
-        Connection(
-            _In_ PFLT_FILTER Filter,
-            _In_ PFLT_PORT ClientPort
-        ) noexcept;
-        ~Connection();
-
-        /// @brief Send data to the connected user-mode application (fire-and-forget).
-        /// @param Buffer The buffer containing the data to send.
-        /// @param BufferSize The size of the buffer in bytes.
-        /// @return [TODO]
-        NTSTATUS Send(
-            _In_reads_bytes_(BufferSize) PVOID Buffer,
-            _In_ ULONG BufferSize
-        ) noexcept;
-
-        /// @brief Send synchronously and wait for the service's 1-byte verdict.
-        ///        Used on the enforcement path: the calling callback blocks here
-        ///        (bounded by a short timeout) so it can allow/deny inline.
-        /// @param Buffer The frame to send (reply-expected flag set).
-        /// @param BufferSize Size of the frame in bytes.
-        /// @param Deny Out: TRUE if the service denied; FALSE on allow/timeout/error
-        ///        (fail-open: a slow service must not break the operation).
-        /// @return The FltSendMessage status (STATUS_TIMEOUT if the service was too slow).
-        _IRQL_requires_max_(APC_LEVEL)
-        NTSTATUS SendWithReply(
-            _In_reads_bytes_(BufferSize) PVOID Buffer,
-            _In_ ULONG BufferSize,
-            _Out_ bool* Deny
-        ) noexcept;
     };
 }

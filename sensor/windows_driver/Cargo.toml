@@ -1,0 +1,44 @@
+[package]
+name = "snsdrv"
+version = "0.1.0"
+edition = "2021"
+description = "SnsDrv — kernel-mode EDR sensor (minifilter) for the endpoint_service, in Rust"
+license = "MIT"
+publish = false
+
+# A kernel driver is a system-loadable image, not an .exe/.rlib: build it as a
+# cdylib and let the WDK build pipeline (see makefile.toml) turn the resulting
+# DLL into a signed .sys.
+[lib]
+crate-type = ["cdylib"]
+
+# windows-drivers-rs. `wdk-sys` gives the raw NT bindings; `wdk-panic` a kernel-safe
+# panic handler. There is deliberately **no `wdk-alloc`** — this driver uses no heap
+# (see the "No heap" note in src/lib.rs), so there is no global allocator and thus no
+# infallible-allocation path that could bugcheck the kernel on OOM. FltMgr symbols
+# that wdk-sys does not surface are declared by hand in src/fltmgr.rs.
+[dependencies]
+wdk = "0.4"
+wdk-sys = "0.5"
+wdk-panic = "0.4"
+
+# Must match the wdk-build version wdk-sys pulls in, or cargo-make's
+# load_rust_driver_makefile trips MultipleWdkBuildCratesDetected.
+[build-dependencies]
+wdk-build = "0.5"
+
+# panic=abort is mandatory in the kernel (there is no unwinder), and LTO keeps the
+# image small. Mirrors sanctum's profiles.
+[profile.dev]
+panic = "abort"
+lto = true
+
+[profile.release]
+panic = "abort"
+lto = true
+
+# Metadata read by wdk-build to configure the driver image. A minifilter is a
+# file-system filter registered through FltMgr; from the linker's point of view it
+# is a plain WDM driver image (no KMDF), so we declare KMDF off / WDM config.
+[package.metadata.wdk.driver-model]
+driver-type = "WDM"

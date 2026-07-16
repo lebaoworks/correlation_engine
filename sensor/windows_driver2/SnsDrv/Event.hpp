@@ -34,14 +34,21 @@ namespace Event
 
     struct Event;
 
-    _IRQL_requires_max_(APC_LEVEL)
-    _IRQL_requires_same_
-    using EventNotifyCallback = NTSTATUS(*)(krn::unique_ptr<Event>&);
+    // Async telemetry: serialize `evt` into the shared ring and return. Takes a
+    // reference, not ownership: since telemetry moved to the ring there is no queue
+    // to hand the event to, so callbacks build it on the stack and it dies with them.
+    //
+    // Callable at IRQL <= APC_LEVEL. The constraint is stated here rather than as a
+    // SAL annotation because these are alias declarations: with Code Analysis on,
+    // `_IRQL_requires_max_` expands to a __declspec that cannot precede `using`, and
+    // it would annotate the alias rather than the target anyway. The implementations
+    // (Ring::PublishTelemetry / Ring::EnforceSync) carry the real annotation.
+    using EventNotifyCallback = NTSTATUS(*)(const Event&);
 
-    // Enforcement path: serialize `evt`, send it synchronously to the service and
-    // return its verdict in `*Deny` (TRUE = deny the operation). Used only for the
-    // rare armed / static-chokepoint events, so latency stays off the hot path.
-    _IRQL_requires_max_(APC_LEVEL)
+    // Enforcement path: publish `evt` to the ring flagged reply-expected and block
+    // until the service answers, returning its verdict in `*Deny` (TRUE = deny).
+    // Used only for the rare armed / static-chokepoint events, so latency stays off
+    // the hot path. Callable at IRQL <= APC_LEVEL (see above).
     using SyncEnforceCallback = NTSTATUS(*)(const Event& evt, bool* Deny);
 
     using String = krn::UnicodeStringBase<krn::tag<'EVT1'>>;
@@ -79,10 +86,16 @@ namespace Event
         | 5      | 3    | Reserved                     | Zero                                          |
         | 8      | 8    | TimeStamp (I64)              | FILETIME (100-ns since 1601)                  |
         | 16     | 4    | ProcessId (U32)              | Acting process id                             |
-        | 20     | 4    | Reserved                     | Zero                                          |
+        | 20     | 4    | ReqId (U32)                  | Enforce request id, or 0 (see below)          |
         | 24     | 8    | ProcessCreateTime (I64)      | Acting process creation time (identity)       |
         +--------+------+------------------------------+-----------------------------------------------+
         Strings (at the tail of a record): Length:U16 (bytes) ++ UTF-16LE data.
+
+        ReqId is meaningful only when the enclosing frame has FRAME_REPLY_EXPECTED
+        set in its Count field: it names the kernel thread blocked on the verdict, so
+        the service's C_VERDICT can be routed back to it (Ring::PendingVerdicts).
+        It is zero on every async telemetry record. The field was reserved-and-zeroed
+        before the ring existed, so replay dumps decode unchanged.
         */
         struct Header
         {
@@ -92,7 +105,7 @@ namespace Event
             UINT16 Reserved1;
             INT64  TimeStamp;
             UINT32 ProcessId;
-            UINT32 Reserved2;
+            UINT32 ReqId;
             INT64  ProcessCreateTime;
         };
         static_assert(sizeof(Header) == 32, "wire header must be 32 bytes");

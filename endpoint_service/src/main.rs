@@ -46,6 +46,13 @@ struct Args {
     #[arg(long, default_value = r"\SnsDrvPort")]
     com_port: String,
 
+    /// Sensor transport. `ring` (default) takes telemetry from a shared-memory ring
+    /// the driver maps into us and never enters the kernel on the hot path; `port`
+    /// is the older one-message-per-event path, kept as a fallback for a driver that
+    /// predates the ring. Both use the same port for control and verdicts.
+    #[arg(long, value_enum, default_value_t = Transport::Ring)]
+    transport: Transport,
+
     /// Backend service address to ship telemetry + alerts to.
     #[arg(long, default_value = "127.0.0.1:7171")]
     remote_addr: String,
@@ -90,7 +97,7 @@ fn main() -> ExitCode {
     } else if let Some(n) = args.stress {
         Mode::Stress(n)
     } else {
-        Mode::Port(args.com_port)
+        Mode::Port(args.com_port, args.transport)
     };
     // Backend: remote by default, in-process on request.
     let backend_addr = if args.in_process { None } else { Some(args.remote_addr) };
@@ -277,8 +284,19 @@ enum Mode {
     Demo,
     File(String),
     Stdin,
-    Port(String),
+    Port(String, Transport),
     Stress(u64),
+}
+
+/// How telemetry gets out of the sensor. Control (arm/disarm) and verdicts go over
+/// the minifilter port either way — only the event firehose differs.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum Transport {
+    /// Shared-memory ring: the driver maps a non-paged pool region into us and
+    /// publishes into it; no kernel transition per event.
+    Ring,
+    /// One `FltSendMessage` per event. Kept for a driver that predates the ring.
+    Port,
 }
 
 fn mode_label(m: &Mode) -> String {
@@ -286,7 +304,8 @@ fn mode_label(m: &Mode) -> String {
         Mode::Demo => "demo".to_string(),
         Mode::Stdin => "stdin".to_string(),
         Mode::File(p) => format!("file:{}", p),
-        Mode::Port(n) => format!("port:{}", n),
+        Mode::Port(n, Transport::Ring) => format!("ring:{}", n),
+        Mode::Port(n, Transport::Port) => format!("port:{}", n),
         Mode::Stress(n) => format!("stress:{}", n),
     }
 }
@@ -460,18 +479,23 @@ fn build_source(mode: Mode) -> io::Result<Box<dyn EventSource>> {
             let f = fs::File::open(&p)?;
             Ok(Box::new(ReaderSource::new(f, p)))
         }
-        Mode::Port(name) => connect_port(name),
+        Mode::Port(name, t) => connect_port(name, t),
         Mode::Stress(n) => Ok(Box::new(StressSource::new(n))),
     }
 }
 
 #[cfg(windows)]
-fn connect_port(name: String) -> io::Result<Box<dyn EventSource>> {
-    Ok(Box::new(edr_endpoint_service::winport::WinPortSource::connect(&name)?))
+fn connect_port(name: String, transport: Transport) -> io::Result<Box<dyn EventSource>> {
+    match transport {
+        Transport::Ring => Ok(Box::new(edr_endpoint_service::ring::RingSource::connect(&name)?)),
+        Transport::Port => {
+            Ok(Box::new(edr_endpoint_service::winport::WinPortSource::connect(&name)?))
+        }
+    }
 }
 
 #[cfg(not(windows))]
-fn connect_port(_name: String) -> io::Result<Box<dyn EventSource>> {
+fn connect_port(_name: String, _transport: Transport) -> io::Result<Box<dyn EventSource>> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "--com-port (live sensor) chỉ hỗ trợ trên Windows. Dùng --demo/--file/--stdin để thử.",

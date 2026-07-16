@@ -89,6 +89,39 @@ fn reply_expected_flag_roundtrips() {
     assert_eq!(sensor::parse_batch(&sync_frame).unwrap().len(), 1);
 }
 
+/// `ReqId` ties a verdict back to the blocked kernel thread. It reuses a header
+/// field that used to be reserved-and-zeroed, so it must not disturb decoding.
+#[test]
+fn req_id_roundtrips_without_disturbing_the_record() {
+    let rec = sensor::enc_process_open(
+        21_000_000, 800, 20_000_000, 50, 9_000_000, 0x0010, r"C:\Windows\System32\lsass.exe",
+    );
+    let plain = sensor::build_frame(&[rec.clone()], false);
+    let enforce = sensor::build_enforce_frame(&rec, 0xdead_beef);
+
+    assert!(sensor::expects_reply(&enforce));
+    assert_eq!(sensor::req_id(&enforce), 0xdead_beef);
+    // Same record either way — the id lives in the header, not the body.
+    assert_eq!(sensor::parse_batch(&enforce).unwrap(), sensor::parse_batch(&plain).unwrap());
+}
+
+/// Frames from before this field existed zero-filled it, so an untagged frame must
+/// read back as "no request" rather than as request 0 belonging to someone.
+#[test]
+fn telemetry_frames_carry_no_req_id() {
+    let rec = sensor::enc_file_write(1_000, 4321, 5_000, r"C:\x.tmp");
+    let frame = sensor::build_batch(&[rec]);
+    assert!(!sensor::expects_reply(&frame));
+    assert_eq!(sensor::req_id(&frame), 0);
+}
+
+/// A truncated frame must not read past its own bytes chasing the id.
+#[test]
+fn req_id_of_a_headerless_frame_is_zero_not_a_panic() {
+    assert_eq!(sensor::req_id(&[]), 0);
+    assert_eq!(sensor::req_id(&sensor::build_batch(&[])), 0);
+}
+
 /// Records stay 8-aligned: every record size is a multiple of 8 and numeric
 /// fields land on their natural alignment inside the batch buffer.
 #[test]

@@ -6,6 +6,8 @@
 //! decision is handed back to the sensor by the source's `reply`.
 
 pub mod control;
+pub mod ring;
+pub mod ringbuf;
 pub mod sensor;
 pub mod source;
 pub mod translate;

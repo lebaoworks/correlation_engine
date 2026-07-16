@@ -123,7 +123,7 @@
     <ClCompile Include="MiniFilter.cpp" />
     <ClCompile Include="WPF.cpp" />
     <ClCompile Include="Callbacks.cpp" />
-    <ClCompile Include="Worker.cpp" />
+    <ClCompile Include="Ring.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="ArmTable.hpp" />
@@ -135,7 +135,7 @@
     <ClInclude Include="Utilities\krn.hpp" />
     <ClInclude Include="Utilities\queue.hpp" />
     <ClInclude Include="Utilities\std.hpp" />
-    <ClInclude Include="Worker.hpp" />
+    <ClInclude Include="Ring.hpp" />
   </ItemGroup>
   <ItemGroup>
     <None Include="ProcessMonitor.md" />

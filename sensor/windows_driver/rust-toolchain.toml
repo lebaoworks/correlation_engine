@@ -1,0 +1,6 @@
+# windows-drivers-rs requires nightly (build-std, kernel target tweaks).
+# Pinned so a toolchain bump is a deliberate, reviewable change.
+[toolchain]
+channel = "nightly"
+components = ["rust-src", "rustfmt", "clippy", "llvm-tools"]
+targets = ["x86_64-pc-windows-msvc"]
