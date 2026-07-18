@@ -1,0 +1,468 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Engine base — Provenance graph · Storyline · Automaton (bước qua từng event)</title>
+<style>
+  :root{
+    --bg:#0a0e14; --bg2:#0e131c; --panel:#141b26; --panel2:#1a2331;
+    --line:#25303f; --line2:#324054;
+    --ink:#e9eef5; --muted:#8b9aad; --dim:#5c6b7e;
+    --accent:#8b7cff; --cyan:#38bdf8;
+    --allow:#34d399; --arm:#fbbf24; --deny:#fb6f84;
+    --s1:#8b7cff; --slow:#fb923c;
+    --mono: ui-monospace,"Cascadia Code","JetBrains Mono","SFMono-Regular",Consolas,monospace;
+    --sans: system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{margin:0;background:
+      radial-gradient(1100px 700px at 82% -10%, #1622300f 0%, transparent 55%),
+      var(--bg);
+    color:var(--ink);font-family:var(--sans);
+    display:flex;align-items:center;justify-content:center;overflow:hidden;-webkit-font-smoothing:antialiased;}
+
+  .stage{position:relative;width:min(96vw, calc(92vh*16/9));aspect-ratio:16/9;
+    container-type:inline-size;
+    background:linear-gradient(180deg,var(--bg2),var(--panel) 140%);
+    border:1px solid var(--line);border-radius:1.1cqi;overflow:hidden;
+    box-shadow:0 3cqi 8cqi -3cqi #000, inset 0 0 0 1px #ffffff06;
+    display:grid;grid-template-columns:21% 79%;
+    grid-template-rows:4.6cqi 1fr 2.7cqi auto auto 3.7cqi;
+    grid-template-areas:"top top" "table graph" "table pipe" "table autos" "table note" "table rail";}
+
+  .top{grid-area:top;display:flex;align-items:center;justify-content:space-between;padding:0 2cqi;border-bottom:1px solid var(--line);gap:1cqi}
+  .brand{font-family:var(--mono);font-size:1.1cqi;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);display:flex;gap:.8cqi;align-items:center;white-space:nowrap}
+  .brand .d{width:.85cqi;height:.85cqi;border-radius:50%;background:var(--accent);box-shadow:0 0 1.4cqi var(--accent);flex:none}
+  .legend{display:flex;gap:1.1cqi;font-family:var(--mono);font-size:.98cqi;color:var(--muted);align-items:center;white-space:nowrap}
+  .legend i{width:1.7cqi;height:0;border-top:2px solid;display:inline-block;margin-right:.35cqi;vertical-align:middle}
+  .legend .tc{border-top-style:dashed;border-color:var(--dim)}
+  .sw{width:.95cqi;height:.95cqi;border-radius:50%;display:inline-block;margin-right:.3cqi;vertical-align:middle}
+
+  /* ---- LEFT: event table ---- */
+  .table{grid-area:table;border-right:1px solid var(--line);padding:.7cqi .8cqi;display:flex;flex-direction:column;gap:.32cqi;overflow:hidden}
+  .table h3{font-family:var(--mono);font-size:.85cqi;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);margin:0 0 .1cqi}
+  .erow{border:1px solid var(--line);border-radius:.5cqi;padding:.3cqi .55cqi;background:var(--panel);opacity:.32;filter:saturate(.4);transition:.4s;display:flex;flex-direction:column;gap:.12cqi}
+  .erow.on{opacity:1;filter:none}
+  .erow.cur{border-color:var(--accent);box-shadow:0 0 2.4cqi -1cqi var(--accent);background:#8b7cff10}
+  .erow .l1{display:flex;justify-content:space-between;align-items:center;font-family:var(--mono);font-size:.7cqi;color:var(--dim)}
+  .erow .l2{font-family:var(--mono);font-size:.84cqi;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .erow .l2 .op{font-weight:700}
+  .op.causal{color:var(--accent)} .op.touch{color:var(--dim)} .op.slow{color:var(--slow)}
+  .erow .tag{font-family:var(--mono);font-size:.72cqi;align-self:flex-start;padding:.05cqi .45cqi;border-radius:.35cqi;border:1px solid var(--line2);color:var(--dim)}
+  .erow.on .tag.hit{color:var(--allow);border-color:#34d39955;background:#34d39912}
+  .erow.on .tag.warn{color:var(--arm);border-color:#fbbf2455;background:#fbbf2412}
+  .erow.on .tag.bad{color:var(--deny);border-color:#fb6f8455;background:#fb6f8412}
+
+  /* ---- RIGHT-TOP: storyline panel (DSU) + provenance graph, side by side ---- */
+  .gwrap{grid-area:graph;display:flex;gap:.9cqi;margin:.9cqi 1.3cqi .3cqi;min-height:0}
+  .graph{position:relative;flex:1;min-width:0;border:1px solid var(--line);border-radius:.9cqi;
+    background:radial-gradient(circle at 50% 40%, #ffffff06, transparent 70%), var(--bg2);overflow:hidden}
+  .glabel{position:absolute;top:.8cqi;left:1.1cqi;font-family:var(--mono);font-size:.78cqi;letter-spacing:.08em;text-transform:uppercase;color:var(--dim);z-index:3}
+  /* storyline panel = TẬP identity theo thành phần liên thông (DSU), tương phản với đồ thị có cạnh */
+  .epview{flex:0 0 41%;min-width:0;border:1px solid var(--s1);border-radius:.9cqi;background:#8b7cff08;
+    padding:.6cqi .7cqi;display:flex;flex-direction:column;gap:.5cqi;overflow:auto}
+  .eptitle{font-family:var(--mono);font-size:.76cqi;letter-spacing:.05em;text-transform:uppercase;color:var(--accent);display:flex;justify-content:space-between;align-items:baseline;gap:.5cqi}
+  .eptitle .sub{font-size:.6cqi;color:var(--dim);text-transform:none;letter-spacing:0;white-space:nowrap}
+  .epcard{border:1.5px solid var(--line2);border-radius:.65cqi;padding:.45cqi .55cqi;display:flex;flex-direction:column;gap:.32cqi;transition:.4s}
+  .epcard.s1{border-color:var(--s1);background:#8b7cff12}
+  .epcard.slow{border-color:var(--slow);background:#fb923c12}
+  .epcard.done{opacity:.85}
+  .epcard .ch{display:flex;justify-content:space-between;align-items:baseline;gap:.5cqi;font-family:var(--mono)}
+  .epcard .ch .id{font-size:.8cqi;font-weight:700;color:var(--ink)}
+  .epcard .ch .au{font-size:.6cqi;color:var(--muted);white-space:nowrap}
+  .chips{display:flex;flex-wrap:wrap;gap:.3cqi}
+  .chip2{font-family:var(--mono);font-size:.66cqi;padding:.1cqi .5cqi;border-radius:1cqi;border:1.5px solid var(--line2);background:var(--panel);color:var(--muted);white-space:nowrap;transition:.3s}
+  .chip2.blocked{border-color:var(--deny);color:var(--deny);background:#fb6f8414}
+  .epnote{font-family:var(--mono);font-size:.6cqi;color:var(--dim)}
+  .edges{position:absolute;inset:0;width:100%;height:100%}
+  .gedge{stroke:var(--line2);stroke-width:2;opacity:0;transition:opacity .5s ease}
+  .gedge.on{opacity:1}
+  .gedge.s1{stroke:var(--s1)} .gedge.slow{stroke:var(--slow)}
+  .gedge.touch{stroke:var(--dim);stroke-dasharray:4 4}
+  .gedge.denyE{stroke:var(--deny)}
+  .gnode{position:absolute;transform:translate(-50%,-50%) scale(.4);opacity:0;transition:.5s cubic-bezier(.34,1.4,.64,1);
+    width:4.3cqi;height:4.3cqi;border-radius:50%;border:1.5px solid var(--line2);background:var(--panel);
+    display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.06cqi;font-family:var(--mono);z-index:2;text-align:center;padding:.18cqi}
+  .gnode.on{opacity:1;transform:translate(-50%,-50%) scale(1)}
+  .gnode .k{font-size:.64cqi;font-weight:700;color:var(--ink);line-height:1.03}
+  .gnode .k2{font-size:.52cqi;color:var(--dim)}
+  .gnode.s1{border-color:var(--s1);background:#8b7cff18;box-shadow:0 0 3cqi -1cqi var(--s1)} .gnode.s1 .k2{color:var(--s1)}
+  .gnode.slow{border-color:var(--slow);background:#fb923c18;box-shadow:0 0 3cqi -1cqi var(--slow)} .gnode.slow .k2{color:var(--slow)}
+  .gnode.touch{border-style:dashed;border-color:var(--dim)} .gnode.touch .k2{color:var(--dim)}
+  .gnode.denyN{border-color:var(--deny);box-shadow:0 0 3cqi -0.5cqi var(--deny)} .gnode.denyN .k2{color:var(--deny)}
+
+  /* ---- pipe: bộ đếm toàn cục — chỉ tăng, không có chính sách gỡ ---- */
+  .pipe{grid-area:pipe;margin:0 1.3cqi;display:flex;align-items:center;gap:.7cqi;font-family:var(--mono);font-size:.82cqi}
+  .chip{border:1px solid var(--line2);border-radius:.5cqi;padding:.2cqi .6cqi;color:var(--dim);background:var(--panel);white-space:nowrap;transition:.3s}
+  .chip b{color:var(--ink);font-weight:700}
+  .chip.shipA{color:var(--allow);border-color:#34d39955;background:#34d39910}
+  .chip.actA{color:var(--accent);border-color:#8b7cff55;background:#8b7cff10}
+  .chip.pinA{color:var(--allow);border-color:#34d39955;background:#34d39910}
+  .chip.karmA{color:var(--arm);border-color:#fbbf2455;background:#fbbf2410}
+  .chip.karmD{color:var(--deny);border-color:#fb6f8488;background:#fb6f8420}
+
+  /* ---- automata ---- */
+  .autos{grid-area:autos;margin:.35cqi 1.3cqi 0;display:flex;flex-direction:column;gap:.4cqi}
+  .aut{display:flex;flex-direction:column;gap:.2cqi}
+  .autohd{display:flex;justify-content:space-between;align-items:center;gap:1cqi}
+  .autohd .t{font-family:var(--mono);font-size:.8cqi;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .state{font-family:var(--mono);font-size:.8cqi;font-weight:700;letter-spacing:.05em;padding:.12cqi .6cqi;border-radius:.4cqi;border:1px solid var(--line2);color:var(--dim);flex:none}
+  .state.seeded{color:var(--accent);border-color:#8b7cff55;background:#8b7cff12}
+  .state.warn{color:var(--arm);border-color:#fbbf2588;background:#fbbf2420}
+  .state.blocked{color:var(--deny);border-color:#fb6f8488;background:#fb6f8420}
+  .amrow{display:flex;gap:.45cqi;align-items:stretch}
+  .abit{flex:1;border:1.5px solid var(--line2);border-radius:.5cqi;background:var(--panel);padding:.26cqi .45cqi;display:flex;align-items:center;gap:.45cqi;transition:.4s;min-width:0}
+  .abit .box{width:1.3cqi;height:1.3cqi;border-radius:.35cqi;border:1.5px solid var(--line2);display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:.8cqi;color:var(--dim);flex:none;transition:.4s}
+  .abit .m{min-width:0}
+  .abit .m .tt{font-family:var(--mono);font-size:.84cqi;color:var(--ink);font-weight:600;display:block;line-height:1.05;white-space:nowrap}
+  .abit .m .pr{font-family:var(--mono);font-size:.64cqi;color:var(--dim);white-space:nowrap}
+  .abit .m .pr.act-log{color:var(--accent)}
+  .abit .m .pr.act-warn{color:var(--arm)}
+  .abit .m .pr.act-contain{color:var(--deny)}
+  .abit.set{border-color:var(--allow);background:#34d3990e}
+  .abit.set .box{border-color:var(--allow);background:var(--allow);color:#06281c}
+  .abit.blockstep.set{box-shadow:0 0 0 2px var(--deny)}
+  .amfoot{display:flex;align-items:center;gap:.7cqi}
+  .mask{font-family:var(--mono);font-size:.82cqi;color:var(--muted);white-space:nowrap}
+  .mask b{color:var(--ink)}
+  .bar{flex:1;height:.85cqi;border-radius:1cqi;background:var(--panel2);border:1px solid var(--line);position:relative;overflow:visible}
+  .bar .fill{height:100%;width:0;border-radius:1cqi;background:linear-gradient(90deg,var(--accent),var(--cyan));transition:width .6s cubic-bezier(.4,0,.2,1)}
+  .bar .fill.warn{background:linear-gradient(90deg,var(--arm),#f59e0b)}
+  .bar .fill.crit{background:linear-gradient(90deg,var(--deny),var(--arm))}
+  .spacer{flex:1}
+  .autoNote{font-family:var(--mono);font-size:.74cqi;color:var(--dim);line-height:1.3;padding:.1cqi 0 .05cqi}
+
+  /* ---- narration ---- */
+  .note{grid-area:note;margin:.4cqi 1.3cqi .1cqi;font-family:var(--mono);font-size:.92cqi;line-height:1.36;color:var(--muted);
+    border-top:1px solid var(--line);padding-top:.5cqi;min-height:4.7cqi}
+  .note b{color:var(--ink)} .note .g{color:var(--allow)} .note .y{color:var(--arm)} .note .r{color:var(--deny)} .note .o{color:var(--slow)} .note .p{color:var(--accent)}
+
+  /* ---- rail ---- */
+  .rail{grid-area:rail;border-top:1px solid var(--line);display:flex;align-items:center;justify-content:flex-end;padding:0 1.3cqi;gap:.7cqi}
+  .nav{display:flex;gap:.6cqi;align-items:center}
+  .nav button{all:unset;cursor:pointer;font-family:var(--mono);font-size:1cqi;color:var(--muted);border:1px solid var(--line2);border-radius:.55cqi;padding:.26cqi .9cqi;transition:.2s;outline-offset:2px;white-space:nowrap}
+  .nav button:hover{color:var(--ink);border-color:var(--accent);background:#8b7cff14}
+  .nav button:focus-visible{outline:2px solid var(--accent)}
+  .nav .cnt{font-family:var(--mono);font-size:1.05cqi;color:var(--dim);padding:0 .5cqi}
+
+  /* ---- thuật ngữ click được + popup ---- */
+  .term{color:var(--ink);border-bottom:1px dashed var(--accent);cursor:pointer;transition:.15s}
+  .term:hover{color:var(--accent);background:#8b7cff14}
+  .pop-ov{position:absolute;inset:0;z-index:10;background:#05080dcc;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(2px)}
+  .pop-ov[hidden]{display:none}
+  .pop{width:min(54cqi,88%);max-height:82%;overflow:auto;background:var(--panel);border:1px solid var(--line2);border-radius:.9cqi;box-shadow:0 2cqi 6cqi -2cqi #000;padding:1.1cqi 1.3cqi}
+  .pop-hd{display:flex;justify-content:space-between;align-items:center;gap:1cqi;margin-bottom:.6cqi}
+  .pop-hd span{font-family:var(--mono);font-size:1.15cqi;font-weight:700;color:var(--accent);letter-spacing:.04em}
+  .pop-hd button{all:unset;cursor:pointer;font-family:var(--mono);font-size:1.05cqi;color:var(--dim);border:1px solid var(--line2);border-radius:.5cqi;padding:.12cqi .55cqi}
+  .pop-hd button:hover{color:var(--ink);border-color:var(--accent)}
+  .pop-b{font-family:var(--mono);font-size:.95cqi;line-height:1.55;color:var(--muted)}
+  .pop-b b{color:var(--ink)} .pop-b .g{color:var(--allow)} .pop-b .y{color:var(--arm)} .pop-b .r{color:var(--deny)}
+  .pop-b .p{color:var(--accent)} .pop-b .o{color:var(--slow)}
+  .pop-b code{color:var(--cyan);font-family:var(--mono)}
+  .pop-b .src{display:block;margin-top:.7cqi;font-size:.8cqi;color:var(--dim)}
+
+  @media (prefers-reduced-motion: reduce){*{transition-duration:.12s !important}}
+</style>
+</head>
+<body>
+  <div class="stage" id="stage" tabindex="0">
+    <div class="top">
+      <div class="brand"><span class="d"></span> Engine base · Provenance graph · Storyline · Automaton</div>
+      <div class="legend">
+        <span><span class="sw" style="background:var(--s1)"></span>S1 ransomware</span>
+        <span><span class="sw" style="background:var(--slow)"></span>S2 không liên quan</span>
+        <span><i class="tc"></i>cạnh "touch"</span>
+      </div>
+    </div>
+
+    <!-- LEFT: event table (nguồn: docs/replay.md) -->
+    <div class="table">
+      <h3>Luồng event · replay.md</h3>
+      <div class="erow" data-ev="1">
+        <div class="l1"><span>E1 · t=1000</span><span>exec</span></div>
+        <div class="l2"><span class="op causal">exec</span> explorer → powershell</div>
+        <div class="tag hit">⇒ T1059 · seed A → inspect</div>
+      </div>
+      <div class="erow" data-ev="2">
+        <div class="l1"><span>E2 · t=1500</span><span>open</span></div>
+        <div class="l2"><span class="op touch">open</span> powershell → DIR_documents</div>
+        <div class="tag hit">⇒ T1083 · bước 2/4 → inspect</div>
+      </div>
+      <div class="erow" data-ev="3">
+        <div class="l1"><span>E3 · t=1650</span><span>exec</span></div>
+        <div class="l2"><span class="op slow">exec</span> svchost → conhost</div>
+        <div class="tag">⇒ không TTP · ignore (storyline S2 mới)</div>
+      </div>
+      <div class="erow" data-ev="4">
+        <div class="l1"><span>E4 · t=2000</span><span>exec</span></div>
+        <div class="l2"><span class="op causal">exec</span> powershell → vssadmin</div>
+        <div class="tag warn">⇒ T1490 · bước 3/4 → block</div>
+      </div>
+      <div class="erow" data-ev="5">
+        <div class="l1"><span>E5 · t=2200</span><span>read</span></div>
+        <div class="l2"><span class="op slow">read</span> conhost → readme.txt</div>
+        <div class="tag">⇒ không TTP · ignore (S2 lớn thêm)</div>
+      </div>
+      <div class="erow" data-ev="6">
+        <div class="l1"><span>E6 · t=2500</span><span>write</span></div>
+        <div class="l2"><span class="op causal">write</span> powershell → DOC1 · entropy .96</div>
+        <div class="tag bad">⇒ T1486 · bước 4/4 → disarm(write, exec)</div>
+      </div>
+      <div class="erow" data-ev="7">
+        <div class="l1"><span>E7 · t=2600</span><span>write</span></div>
+        <div class="l2"><span class="op causal">write</span> powershell → DOC2 · entropy .95</div>
+        <div class="tag bad">⇒ write ∈ DISARMED(powershell) → block, DOC2 không tồn tại</div>
+      </div>
+      <div class="erow" data-ev="8">
+        <div class="l1"><span>E8 · t=2750</span><span>exec</span></div>
+        <div class="l2"><span class="op slow">exec</span> svchost → notepad</div>
+        <div class="tag">⇒ không TTP · ignore (S2 lớn thêm)</div>
+      </div>
+    </div>
+
+    <!-- RIGHT-TOP: storyline (DSU, không cạnh) + provenance graph (đầy đủ, có cạnh) -->
+    <div class="gwrap">
+      <div class="epview" id="epview"></div>
+      <div class="graph" id="graph">
+        <div class="glabel">Provenance graph (đầy đủ · không trần · không GC)</div>
+        <svg class="edges" viewBox="0 0 100 100" preserveAspectRatio="none">
+          <line class="gedge s1"       data-ev="1" x1="8"  y1="20" x2="26" y2="38" vector-effect="non-scaling-stroke"/>
+          <line class="gedge s1 touch" data-ev="2" x1="26" y1="38" x2="12" y2="62" vector-effect="non-scaling-stroke"/>
+          <line class="gedge slow"     data-ev="3" x1="78" y1="18" x2="90" y2="34" vector-effect="non-scaling-stroke"/>
+          <line class="gedge s1"       data-ev="4" x1="26" y1="38" x2="44" y2="16" vector-effect="non-scaling-stroke"/>
+          <line class="gedge slow touch" data-ev="5" x1="90" y1="34" x2="92" y2="58" vector-effect="non-scaling-stroke"/>
+          <line class="gedge s1 denyE" data-ev="6" x1="26" y1="38" x2="46" y2="66" vector-effect="non-scaling-stroke"/>
+          <line class="gedge slow"     data-ev="8" x1="78" y1="18" x2="78" y2="66" vector-effect="non-scaling-stroke"/>
+        </svg>
+        <div class="gnode s1"        data-ev="1" style="left:8%;top:20%"><span class="k">explorer</span><span class="k2">P·S1</span></div>
+        <div class="gnode s1"        data-ev="1" style="left:26%;top:38%"><span class="k">powershell</span><span class="k2">P·S1</span></div>
+        <div class="gnode s1 touch"  data-ev="2" style="left:12%;top:62%"><span class="k">DIR_documents</span><span class="k2">touch</span></div>
+        <div class="gnode slow"      data-ev="3" style="left:78%;top:18%"><span class="k">svchost</span><span class="k2">P·S2</span></div>
+        <div class="gnode slow"      data-ev="3" style="left:90%;top:34%"><span class="k">conhost</span><span class="k2">P·S2</span></div>
+        <div class="gnode s1"        data-ev="4" style="left:44%;top:16%"><span class="k">vssadmin</span><span class="k2">P·S1</span></div>
+        <div class="gnode slow touch" data-ev="5" style="left:92%;top:58%"><span class="k">readme.txt</span><span class="k2">touch</span></div>
+        <div class="gnode s1 denyN"  data-ev="6" style="left:46%;top:66%"><span class="k">DOC1</span><span class="k2">disarm @E6</span></div>
+        <div class="gnode slow"      data-ev="8" style="left:78%;top:66%"><span class="k">notepad</span><span class="k2">P·S2</span></div>
+      </div>
+    </div>
+
+    <!-- pipe: bộ đếm toàn cục (chỉ tăng — bản base không có eviction) -->
+    <div class="pipe">
+      <span class="chip" id="cNodes">nodes <b id="nodesN">0</b></span>
+      <span class="chip" id="cEdges">edges <b id="edgesN">0</b></span>
+      <span class="chip" id="cStory">storylines <b id="storyN">0</b></span>
+      <span class="chip" id="cAuto">automata <b id="autoN">0</b></span>
+      <span class="chip" id="cDisarm">disarmed ops <b id="disarmN">0</b></span>
+      <span class="spacer"></span>
+      <span class="chip" id="cVerdict">verdict <b id="verdictN">—</b></span>
+    </div>
+
+    <!-- automata -->
+    <div class="autos">
+      <div class="aut">
+        <div class="autohd"><span class="t">A · S1 (ransomware_fast_encrypt_linear) — mỗi bước tự mang action</span><span class="state" id="stateA">IDLE</span></div>
+        <div class="amrow">
+          <div class="abit" id="a0"><div class="box">0</div><div class="m"><span class="tt">T1059</span><span class="pr act-log">→ inspect</span></div></div>
+          <div class="abit" id="a1"><div class="box">1</div><div class="m"><span class="tt">T1083</span><span class="pr act-log">→ inspect</span></div></div>
+          <div class="abit" id="a2"><div class="box">2</div><div class="m"><span class="tt">T1490</span><span class="pr act-warn">→ block</span></div></div>
+          <div class="abit blockstep" id="a3"><div class="box">3</div><div class="m"><span class="tt">T1486</span><span class="pr act-contain">→ disarm(write, exec)</span></div></div>
+        </div>
+        <div class="amfoot"><span class="mask">stage <b id="maskA">0/4</b></span><div class="bar"><span class="fill" id="fillA"></span></div></div>
+      </div>
+      <div class="aut">
+        <div class="autohd"><span class="t">S2 · svchost → conhost/notepad</span><span class="state" id="stateB">—</span></div>
+        <div class="autoNote" id="noteB">Chưa có event nào trong S2.</div>
+      </div>
+    </div>
+
+    <!-- narration -->
+    <div class="note" id="note"></div>
+
+    <!-- popup giải thích thuật ngữ -->
+    <div class="pop-ov" id="popov" hidden>
+      <div class="pop">
+        <div class="pop-hd"><span id="popT"></span><button id="popX" aria-label="Đóng">✕</button></div>
+        <div class="pop-b" id="popB"></div>
+      </div>
+    </div>
+
+    <!-- rail -->
+    <div class="rail">
+      <div class="nav">
+        <button id="reset" aria-label="Reset">↺</button>
+        <button id="prev" aria-label="Lùi">‹</button>
+        <span class="cnt" id="cnt">0 / 8</span>
+        <button id="next" aria-label="Thêm event">Thêm event ›</button>
+      </div>
+    </div>
+  </div>
+
+<script>
+(() => {
+  const stage = document.getElementById('stage');
+  const TOTAL = 8;
+  let s = 0;
+
+  // ---- automaton A · S1 (4 bước, TUYẾN TÍNH — mỗi bước tự mang action) ----
+  const STAGE  = {0:0,1:1,2:2,3:2,4:3,5:3,6:4,7:4,8:4};
+  // trạng thái GHIM LẠI của automaton = action của bước gần nhất nó đạt được
+  const ASTATE = {0:['IDLE',''],        1:['INSPECT','seeded'],  2:['INSPECT','seeded'],
+                  3:['INSPECT','seeded'],4:['BLOCK','warn'],     5:['BLOCK','warn'],
+                  6:['DISARM','blocked'],7:['DISARM','blocked'], 8:['DISARM','blocked']};
+  // verdict TỨC THỜI của đúng event đang xử lý (không ghim lại — §5). E7 = block vì
+  // powershell đã bị disarm(write, exec) từ E6 — kiểm tra DISARMED đứng TRƯỚC ADVANCE (§3).
+  const VERD   = {0:'—',1:'inspect',2:'inspect',3:'ignore',4:'block',
+                  5:'ignore',6:'disarm',7:'block',8:'ignore'};
+
+  // ---- bộ đếm toàn cục: mỗi event chỉ CỘNG, không có bước gỡ nào (§6). E7 bị chặn
+  // TẠI CỔNG DISARMED nên không bao giờ chạm graph/automaton — nodes/edges đứng yên. ----
+  const NODES  = {0:0,1:2,2:3,3:5,4:6,5:7,6:8,7:8,8:9};
+  const EDGES  = {0:0,1:1,2:2,3:3,4:4,5:5,6:6,7:6,8:7};
+  const STORY  = {0:0,1:1,2:1,3:2,4:2,5:2,6:2,7:2,8:2};
+  const AUTOM  = {0:0,1:1,2:1,3:1,4:1,5:1,6:1,7:1,8:1};
+  const DISARM = {0:0,1:0,2:0,3:0,4:0,5:0,6:2,7:2,8:2};   // |DISARMED[powershell]| = {write, exec}
+  const S2N    = {0:0,1:0,2:0,3:2,4:2,5:3,6:3,7:3,8:4};
+
+  const NOTE = {
+    0:'Một tiến trình duy nhất: mỗi event vừa <span class="term" data-k="graph">ADD_EDGE</span> vào <span class="term" data-k="graph">provenance graph</span>, vừa <span class="term" data-k="unify">UNIFY_STORYLINE</span>, vừa <span class="term" data-k="advance">ADVANCE</span> automaton nếu có mẫu khớp. Mỗi bước của mẫu tự mang sẵn một <span class="term" data-k="verdict">action</span>: <b>ignore / inspect / block / disarm(ops)</b> — không chấm điểm, không ngưỡng. <span class="term" data-k="disarm">disarm</span> tước quyền một actor khỏi một tập op <b>từ đó về sau</b>. Không tách endpoint/backend, không GC — mọi node/cạnh/automaton ở lại <b>mãi mãi</b>. Bấm <b>→</b>.',
+    1:'E1 <b>exec</b> explorer→powershell: <code>RESOLVE_NODE</code> tạo 2 node mới, <code>ADD_EDGE</code> nối chúng — lưu <b>vĩnh viễn</b>. <code>UNIFY_STORYLINE</code> chưa ai có storyline → tạo <span class="p">S1</span> mới (DSU). <code>TAG_TTP</code>=T1059. <span class="term" data-k="advance">ADVANCE</span>: bước gốc (<code>steps[0]</code>) khớp → <b>seed</b> automaton A, <code>stage</code> 0→1, action của bước này là <b>inspect</b> → verdict event = <span class="p">inspect</span>.',
+    2:'E2 <b>open</b> (touch) powershell→DIR_documents: bản base <b>không phân biệt</b> cạnh nhân-quả với cạnh "chạm" — mọi cạnh đều <code>UNIFY_STORYLINE</code> (§4), nên DIR_documents nhập luôn <span class="p">S1</span>. TAG_TTP=T1083, đúng <code>steps[1]</code> theo <b>đúng thứ tự</b> → <code>stage</code> 1→2, action = <b>inspect</b> → verdict = <span class="p">inspect</span>.',
+    3:'E3 <b>exec</b> svchost→conhost: 2 node mới, <b>không actor/object nào chung</b> với S1 → <code>UNIFY_STORYLINE</code> tạo thành phần liên thông <b>khác</b>, <span class="o">S2</span>. Không TTP nào khớp → <span class="term" data-k="advance">ADVANCE</span> không seed automaton nào cho S2, không bước nào được kích hoạt → verdict event = <b>ignore</b>. Đồ thị giờ có <b>2 storyline song song</b>.',
+    4:'E4 <b>exec</b> powershell→vssadmin: vssadmin là con nhân-quả của powershell → nhập <span class="p">S1</span>. TAG_TTP=T1490, đúng <code>steps[2]</code> → <code>stage</code> 2→3, action = <b>block</b> → verdict event = <span class="y">block</span>: đúng lúc vssadmin cố xoá Shadow Copy, đây là hành vi bị chặn.',
+    5:'E5 <b>read</b> (touch) conhost→readme.txt trong <span class="o">S2</span>: minh hoạ storyline độc lập vẫn tiếp tục lớn lên <b>song song</b> với S1 — không TTP, không bước nào kích hoạt → verdict event = <b>ignore</b>.',
+    6:'E6 <b>write</b> powershell→DOC1, entropy .96 → TAG_TTP=T1486, đúng <code>steps[3]</code> — bước <b>cuối cùng</b> của mẫu → <code>stage</code> 3→4, action = <span class="term" data-k="disarm">disarm(write, exec)</span> → verdict event = <span class="r">disarm</span>, <b>và</b> <code>DISARMED[powershell] = {write, exec}</code> — từ giờ powershell không còn được ghi file hay spawn tiến trình nữa.',
+    7:'E7 <b>write</b> powershell→DOC2: trước khi chạm graph, <code>ON_EVENT</code> kiểm <code>DISARMED[powershell]</code> — <code>write</code> nằm trong đó → <span class="r">verdict = block</span> <b>ngay lập tức</b>, không <code>ADD_EDGE</code>, không <code>UNIFY_STORYLINE</code>, không <code>ADVANCE</code>. DOC2 <b>chưa từng tồn tại</b> trong provenance graph — hệt như write bị hệ điều hành từ chối thật.',
+    8:'E8 <b>exec</b> svchost→notepad: <span class="o">S2</span> không liên quan gì tới powershell nên không bị disarm — event xử lý bình thường, không TTP → verdict = <b>ignore</b>. Sau 8 event: <b>9 node · 7 cạnh · 2 storyline · 1 automaton · 2 op bị tước quyền</b> — <span class="term" data-k="growth">tất cả vẫn còn nguyên trong bộ nhớ</span>, không gì bị gỡ.'
+  };
+
+  const TERMS = {
+    graph:{t:'Provenance graph (không trần, không evict)',b:'Mỗi event sinh đúng <b>một</b> node mới (nếu chưa có) và <b>một</b> cạnh, cả hai được lưu <b>vĩnh viễn</b> trong <code>GRAPH = {nodes, edges}</code> — không có bước nào xoá node hay cạnh. Đây là cấu trúc dữ liệu duy nhất engine cần để biết "ai từng liên quan tới ai" từ lúc khởi động.<span class="src">docs/engine_base.md §2, §3</span>'},
+    unify:{t:'UNIFY_STORYLINE — DSU không trần',b:'Storyline là <b>thành phần liên thông</b> của provenance graph, dựng bằng union-find (DSU) toàn cục. Mỗi cạnh — bất kể loại <code>op</code> — đều gộp hai storyline làm một nếu chúng khác nhau. Không có trần kích thước: một storyline có thể lớn tới đâu cũng được.<br><br>Panel trái ("storyline") chỉ hiện <b>tập thành viên</b> theo từng storyline — không vẽ cạnh; panel phải ("provenance graph") vẽ <b>cùng những node đó</b> kèm cạnh.<span class="src">docs/engine_base.md §4</span>'},
+    advance:{t:'ADVANCE — seed & tiến automaton tuyến tính',b:'Mỗi event, với mỗi pattern chưa có automaton trong storyline: nếu <code>steps[0]</code> khớp thì <b>seed</b> một automaton mới ở <code>stage=1</code>. Với automaton đang có: nếu <code>steps[stage]</code> — đúng bước <b>kế tiếp theo chỉ số</b> — khớp event, <code>stage</code> tăng 1.<br><br>Không có <code>prereq_mask</code>/bitmask/OR-slot — chỉ một chỉ số nguyên tăng dần theo <b>đúng thứ tự viết trong mẫu</b>.<span class="src">docs/engine_base.md §5</span>'},
+    verdict:{t:'Verdict theo action — không chấm điểm',b:'Mỗi bước tự mang sẵn <code>action</code> (<b>ignore / inspect / block / disarm(ops)</b>). Verdict của một event là action <b>mạnh nhất</b> trong số các bước vừa được kích hoạt (seed hoặc tiến) tại đúng event đó, theo thang <code>ignore &lt; inspect &lt; block &lt; disarm</code>.<br><br>Không severity, không threshold, không trạng thái "gần đủ điều kiện" (armed) — verdict là hàm thuần của "cái gì vừa xảy ra ở event này" (cộng thêm hiệu lực của <span class="term" data-k="disarm">disarm</span> đã ghim từ trước).<span class="src">docs/engine_base.md §5</span>'},
+    disarm:{t:'disarm(ops) — tước quyền vĩnh viễn theo actor',b:'Khác ba action còn lại, <code>disarm(ops)</code> có <b>tác dụng phụ</b>: nó thêm <code>ops</code> vào <code>DISARMED[actor]</code> — một map sống <b>vĩnh viễn</b>, không TTL, không thu hồi (đúng triết lý "giữ mọi thứ mãi mãi" của bản base).<br><br>Từ khoảnh khắc đó, <b>mọi</b> event sau của actor này mang một op nằm trong <code>ops</code> đều bị <code>block</code> <b>trước khi</b> chạm tới graph/storyline/automaton — <code>ON_EVENT</code> kiểm <code>DISARMED</code> đầu tiên (§3), không phải qua <code>ADVANCE</code>. Đây là trạng thái duy nhất trong bản base có hiệu lực xuyên nhiều event.<span class="src">docs/engine_base.md §2, §3, §5</span>'},
+    growth:{t:'Bộ nhớ = O(tổng số event)',b:'Không bất biến nào chặn trần: <code>nodes</code>, <code>edges</code>, automaton đã seed, và số cặp <code>(actor, op)</code> bị disarm chỉ <b>tăng</b> theo tổng hoạt động từ lúc engine khởi động — không phải hằng số cấu hình. Chi phí <i>per-event</i> vẫn rẻ; cái không bounded là <i>tổng</i> tích luỹ theo thời gian chạy.<span class="src">docs/engine_base.md §6</span>'}
+  };
+  const popov = document.getElementById('popov');
+  const openPop = k => { const d = TERMS[k]; if(!d) return;
+    document.getElementById('popT').textContent = d.t;
+    document.getElementById('popB').innerHTML = d.b;
+    popov.hidden = false; };
+  const closePop = () => { popov.hidden = true; };
+  document.getElementById('note').addEventListener('click', e=>{
+    const t = e.target.closest('.term'); if(t) openPop(t.dataset.k);
+  });
+  popov.addEventListener('click', e=>{ if(!e.target.closest('.pop')) closePop(); });
+  document.getElementById('popX').addEventListener('click', closePop);
+
+  function setBits(n){
+    for(let i=0;i<4;i++) document.getElementById('a'+i).classList.toggle('set', i<n);
+  }
+
+  // ---- storyline panel: S1/S2 = TẬP thành viên (DSU), không cạnh ----
+  // DOC2 (E7) KHÔNG bao giờ vào S1 — write bị chặn tại cổng DISARMED trước khi tới UNIFY_STORYLINE.
+  const S1_MEM = ['explorer','powershell','DIR_documents','vssadmin','DOC1'];
+  const S2_MEM = ['svchost','conhost','readme.txt','notepad'];
+  const DISARM_LBL = 'disarm · stage 4/4 · powershell ⊘ write,exec';
+  const SVIEW = {
+    0:{cards:[]},
+    1:{cards:[{id:'S1',cls:'s1',au:'inspect · stage 1/4',mem:S1_MEM.slice(0,2)}]},
+    2:{cards:[{id:'S1',cls:'s1',au:'inspect · stage 2/4',mem:S1_MEM.slice(0,3)}]},
+    3:{cards:[{id:'S1',cls:'s1',au:'inspect · stage 2/4',mem:S1_MEM.slice(0,3)},
+              {id:'S2',cls:'slow',au:'không automaton',mem:S2_MEM.slice(0,2)}]},
+    4:{cards:[{id:'S1',cls:'s1',au:'block · stage 3/4',mem:S1_MEM.slice(0,4)},
+              {id:'S2',cls:'slow',au:'không automaton',mem:S2_MEM.slice(0,2)}]},
+    5:{cards:[{id:'S1',cls:'s1',au:'block · stage 3/4',mem:S1_MEM.slice(0,4)},
+              {id:'S2',cls:'slow',au:'không automaton',mem:S2_MEM.slice(0,3)}]},
+    6:{cards:[{id:'S1',cls:'s1 done',au:DISARM_LBL,mem:S1_MEM.slice(0,5),blk:'DOC1'},
+              {id:'S2',cls:'slow',au:'không automaton',mem:S2_MEM.slice(0,3)}]},
+    7:{cards:[{id:'S1',cls:'s1 done',au:DISARM_LBL,mem:S1_MEM.slice(0,5),blk:'DOC1'},
+              {id:'S2',cls:'slow',au:'không automaton',mem:S2_MEM.slice(0,3)}]},
+    8:{cards:[{id:'S1',cls:'s1 done',au:DISARM_LBL,mem:S1_MEM.slice(0,5),blk:'DOC1'},
+              {id:'S2',cls:'slow',au:'không automaton',mem:S2_MEM.slice(0,4)}]},
+  };
+  function chipHtml(n, blocked){
+    return `<span class="chip2 ${blocked?'blocked':''}">${blocked?'⛒ ':''}${n}</span>`;
+  }
+  function renderStoryline(){
+    const d = SVIEW[s];
+    let h = `<div class="eptitle"><span>Storyline @ engine</span><span class="sub">thành phần liên thông · DSU</span></div>`;
+    if(!d.cards.length){
+      h += `<div class="epnote">Chưa có storyline — engine chỉ dựng khi event tới.</div>`;
+    }
+    for(const c of d.cards){
+      h += `<div class="epcard ${c.cls}"><div class="ch"><span class="id">${c.id}</span><span class="au">${c.au}</span></div><div class="chips">`;
+      for(const m of c.mem) h += chipHtml(m, c.blk===m);
+      h += `</div></div>`;
+    }
+    document.getElementById('epview').innerHTML = h;
+  }
+
+  function render(){
+    document.querySelectorAll('.erow').forEach(el=>{
+      const e = +el.dataset.ev;
+      el.classList.toggle('on', e<=s);
+      el.classList.toggle('cur', e===s);
+    });
+    document.querySelectorAll('.gnode,.gedge').forEach(el=>{
+      el.classList.toggle('on', +el.dataset.ev <= s);
+    });
+    renderStoryline();
+
+    setBits(STAGE[s]);
+    document.getElementById('maskA').textContent = STAGE[s]+'/4';
+    const fill = document.getElementById('fillA');
+    fill.style.width = (STAGE[s]/4*100)+'%';
+    fill.classList.toggle('warn', ASTATE[s][1]==='warn');
+    fill.classList.toggle('crit', ASTATE[s][1]==='blocked');
+
+    const [ta,ca] = ASTATE[s]; const stA = document.getElementById('stateA');
+    stA.textContent = ta; stA.className = 'state '+ca;
+    const stB = document.getElementById('stateB');
+    stB.textContent = S2N[s]>0 ? 'không automaton' : '—';
+    stB.className = 'state';
+    document.getElementById('noteB').textContent = S2N[s]>0
+      ? `S2 có ${S2N[s]} node, 0 automaton — chưa event nào trong S2 khớp bước gốc (steps[0]) của bất kỳ mẫu nào.`
+      : 'Chưa có event nào trong S2.';
+
+    document.getElementById('nodesN').textContent   = NODES[s];
+    document.getElementById('edgesN').textContent   = EDGES[s];
+    document.getElementById('storyN').textContent   = STORY[s];
+    document.getElementById('autoN').textContent    = AUTOM[s];
+    document.getElementById('disarmN').textContent  = DISARM[s];
+    document.getElementById('verdictN').textContent = VERD[s];
+    document.getElementById('cNodes').className = 'chip' + (NODES[s]>0 ? ' shipA':'');
+    document.getElementById('cEdges').className = 'chip' + (EDGES[s]>0 ? ' actA':'');
+    document.getElementById('cStory').className = 'chip' + (STORY[s]>0 ? ' pinA':'');
+    document.getElementById('cAuto').className  = 'chip' + (AUTOM[s]>0 ? ' karmA':'');
+    document.getElementById('cDisarm').className = 'chip' + (DISARM[s]>0 ? ' karmD':'');
+    document.getElementById('cVerdict').className = 'chip' +
+      (VERD[s]==='disarm' ? ' karmD' : VERD[s]==='block' ? ' karmA' : VERD[s]==='inspect' ? ' actA' : '');
+
+    document.getElementById('note').innerHTML = NOTE[s];
+    document.getElementById('cnt').textContent = s + ' / ' + TOTAL;
+    document.getElementById('prev').disabled = s===0;
+  }
+
+  const next = () => { if(s<TOTAL){s++;render();} };
+  const prev = () => { if(s>0){s--;render();} };
+  document.getElementById('next').addEventListener('click', e=>{e.stopPropagation();next();});
+  document.getElementById('prev').addEventListener('click', e=>{e.stopPropagation();prev();});
+  document.getElementById('reset').addEventListener('click', e=>{e.stopPropagation();s=0;render();});
+  window.addEventListener('keydown', e=>{
+    if(e.key==='Escape'){closePop();return;}
+    if(!popov.hidden){closePop();}
+    if(['ArrowRight',' ','Enter','PageDown'].includes(e.key)){e.preventDefault();next();}
+    else if(['ArrowLeft','PageUp','Backspace'].includes(e.key)){e.preventDefault();prev();}
+    else if(e.key==='Home'){s=0;render();}
+    else if(e.key==='End'){s=TOTAL;render();}
+    else if(e.key.toLowerCase()==='r'){s=0;render();}
+  });
+
+  stage.focus(); render();
+})();
+</script>
+</body>
+</html>
