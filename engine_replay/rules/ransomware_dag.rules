@@ -1,0 +1,9 @@
+# ransomware_fast_encrypt DAG — engine_v0.0.2.md §6 / docs/replay.md
+# bit 1 (do thám) ∥ bit 2 (xoá Shadow Copy) tự do thứ tự sau bước gốc;
+# bit 3 (mã hoá hàng loạt) là MỐC đòi cả {1, 2} — khớp bất kể 1,2 tới theo chiều nào.
+pattern ransomware_dag
+    step bit=0 ops=exec ttps=T1059
+    step bit=1 prereq=0 ops=read ttps=T1083
+    step bit=2 prereq=0 ops=exec ttps=T1490
+    step bit=3 prereq=1,2 ops=write ttps=T1486 action=disarm(write,exec,create,inject,connect)
+end

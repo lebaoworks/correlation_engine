@@ -5,7 +5,7 @@
 use alloc::collections::BTreeMap;
 
 use crate::event::{Event, Key, OpSet, Ttp};
-use crate::rules::{Action, Step};
+use crate::rules::Action;
 
 /// Verdict của MỘT event — phản ứng mạnh nhất trong các bước vừa kích hoạt
 /// tại đúng event đó (`engine_base.md §5`): `ignore < inspect < block < disarm`.
@@ -26,11 +26,16 @@ pub trait Detector {
     fn on_event(&mut self, e: &Event, ttps: &[Ttp]) -> Verdict;
 }
 
-/// `APPLY` (`engine_base.md §5`) — chung cho mọi bản: bước vừa kích hoạt →
-/// verdict. Không action ⇒ chỉ báo hiệu (`inspect`); disarm tước quyền actor
-/// TỪ BÂY GIỜ, vĩnh viễn.
-pub(crate) fn apply(step: &Step, actor: Key, disarmed: &mut BTreeMap<Key, OpSet>) -> Verdict {
-    match step.action {
+/// `APPLY` (`engine_base.md §5`) — chung cho mọi bản: một bước vừa kích hoạt →
+/// verdict, theo `action` của bước. Không action ⇒ chỉ báo hiệu (`inspect`);
+/// disarm tước quyền actor TỪ BÂY GIỜ, vĩnh viễn. Nhận thẳng `action` (thay vì
+/// cả bước) để dùng chung cho bước tuyến tính lẫn bước DAG.
+pub(crate) fn apply(
+    action: Option<Action>,
+    actor: Key,
+    disarmed: &mut BTreeMap<Key, OpSet>,
+) -> Verdict {
+    match action {
         None => Verdict::Inspect,
         Some(Action::Block) => Verdict::Block,
         Some(Action::Disarm(ops)) => {

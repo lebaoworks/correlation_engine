@@ -160,7 +160,7 @@ impl Engine {
                     .entry(pid)
                     .or_default()
                     .push(Automaton { stage: 1, stage_ts: e.ts });
-                verdict = verdict.max(apply(&p.steps[0], e.actor, disarmed));
+                verdict = verdict.max(apply(p.steps[0].action, e.actor, disarmed));
             }
         }
 
@@ -169,7 +169,7 @@ impl Engine {
             let p = &rules.patterns[pid];
             for a in autos.iter_mut() {
                 if a.stage < p.steps.len() && p.steps[a.stage].matcher.matches(e.op, ttps) {
-                    verdict = verdict.max(apply(&p.steps[a.stage], e.actor, disarmed));
+                    verdict = verdict.max(apply(p.steps[a.stage].action, e.actor, disarmed));
                     a.stage += 1;
                     a.stage_ts = e.ts;
                 }

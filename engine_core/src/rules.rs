@@ -1,5 +1,11 @@
-//! Pattern/Step (`engine_base.md §2`): dãy bước tuyến tính, mỗi bước tự mang
-//! `action` riêng — không có severity/threshold gộp toàn automaton.
+//! Pattern/Step cho các bản engine:
+//! - Tuyến tính ([`Pattern`]/[`Step`], `engine_base.md §2`): dãy bước theo thứ
+//!   tự cố định — dùng cho `base` và `v0_0_1`.
+//! - DAG ([`DagPattern`]/[`DagStep`], `engine_v0.0.2.md §3`): thứ tự bộ phận
+//!   qua `bit` + `prereq_mask` — dùng cho `v0_0_2`.
+//!
+//! Cả hai chia sẻ [`StepMatch`] (điều kiện khớp) và [`Action`] (hành vi cưỡng
+//! chế). Mỗi bước tự mang `action` riêng — không có severity/threshold gộp.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -48,8 +54,43 @@ pub struct Pattern {
     pub steps: Vec<Step>,
 }
 
-/// Tập pattern đã compile, giao cho [`crate::Engine`]. `pattern_id` = chỉ số.
+/// Tập pattern tuyến tính đã compile, giao cho `base`/`v0_0_1`. `pattern_id` = chỉ số.
 #[derive(Clone, Debug, Default)]
 pub struct RuleSet {
     pub patterns: Vec<Pattern>,
+}
+
+// ---- Pattern DAG (`engine_v0.0.2.md §3`): thứ tự bộ phận thay cho tuyến tính ----
+
+/// Một bước trong pattern DAG: khớp `matcher`, đặt bit `bit`, chỉ commit được
+/// khi mọi bit trong `prereq_mask` đã bật. `prereq_mask == 0` ⟹ bước gốc.
+#[derive(Clone, Debug)]
+pub struct DagStep {
+    pub matcher: StepMatch,
+    /// Chỉ số bit (0..64) bước này bật khi commit.
+    pub bit: u8,
+    /// Bitmask các bit phải bật trước; 0 = bước gốc (điểm seed).
+    pub prereq_mask: u64,
+    /// `None` = bước chỉ báo hiệu (verdict `inspect` khi khớp).
+    pub action: Option<Action>,
+}
+
+impl DagStep {
+    /// Bit đơn của bước này, dạng mask.
+    pub fn bit_mask(&self) -> u64 {
+        1u64 << self.bit
+    }
+}
+
+/// Một mẫu tấn công dạng DAG — precedence graph, tiến độ theo bitmask (k ≤ 64 bước).
+#[derive(Clone, Debug)]
+pub struct DagPattern {
+    pub name: String,
+    pub steps: Vec<DagStep>,
+}
+
+/// Tập pattern DAG đã compile, giao cho `v0_0_2`. `pattern_id` = chỉ số.
+#[derive(Clone, Debug, Default)]
+pub struct DagRuleSet {
+    pub patterns: Vec<DagPattern>,
 }

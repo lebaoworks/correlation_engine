@@ -1,7 +1,9 @@
 # TODO — Lộ trình `engine_v*`
 
 Hiện trạng: [`engine_base.md`](engine_base.md) (v0, naive: full provenance graph + automaton
-tuyến tính) → [`engine_v0.0.1.md`](engine_v0.0.1.md) (bỏ đồ thị, chỉ giữ storyline + automaton).
+tuyến tính) → [`engine_v0.0.1.md`](engine_v0.0.1.md) (bỏ đồ thị, chỉ giữ storyline + automaton)
+→ [`engine_v0.0.2.md`](engine_v0.0.2.md) (mục 1 dưới đây: **chỉ** partial-order DAG — không đụng
+bộ nhớ/vòng đời automaton).
 Mỗi mục lớn dưới đây là một bước tối ưu dự kiến (một `engine_v*` kế tiếp), kèm phân tích ưu /
 nhược điểm — và với mỗi nhược điểm, chỉ rõ **bước nào khắc phục nó**. Tham chiếu `§` trỏ về
 [`engine.md`](engine.md) (bản thiết kế đích).
@@ -16,7 +18,7 @@ nguồn mà chưa có bước đích: đó là các cặp *bắt buộc đi kèm
 flowchart TD
     V001["engine_v0.0.1<br/>(hiện tại)"]
 
-    DAG["1. Partial-order DAG<br/>+ seg_window GC"]
+    DAG["1. Partial-order DAG<br/>(chỉ thứ tự bộ phận)"]
     BIND["2. Bindings<br/>(+ tách spawn/load)"]
     IDX["3. BIND_IDX<br/>định tuyến theo identity"]
     CAUSAL["4. Chỉ merge<br/>cạnh nhân-quả"]
@@ -30,7 +32,6 @@ flowchart TD
     V001 --> BIND
     BIND --> IDX
     IDX --> CAUSAL
-    DAG --> WS
     BIND --> WS
     IDX --> CAP
     WS --> SPLIT
@@ -53,15 +54,23 @@ Hai ràng buộc an toàn quan trọng nhất rơi ra từ sơ đồ:
 2. **Không triển khai trần storyline (6) trước khi có BIND_IDX (3).** Chạm trần → từ chối merge →
    automaton mù với event lẽ ra thuộc về nó; BIND_IDX giữ được tiến độ qua identity đã bind, phần
    recall còn lại do backend (7) khâu.
+3. **Vòng đời/GC automaton không đứng riêng — thuộc cụm 2 + 3 + 5.** Bước 1 chỉ thêm partial-order,
+   để automaton bất tử. Điều kiện GC phải định nghĩa trên **identity đã bind** (cần bindings (2) +
+   BIND_IDX (3)) và được thực thi qua `refcount` khi đặt trần working-set (5) — làm GC sớm hơn buộc
+   bịa xấp xỉ thô (process seed / deadline `seg_window`) rồi bindings thay thế ngay. Vì vậy sơ đồ
+   không còn cạnh `1 → 5`: working-set nhận vòng đời automaton từ nhánh bindings (`2 → 5`).
 
 ---
 
-# 1. Pattern = partial-order DAG + GC theo `seg_window`
+# 1. Pattern = partial-order DAG (chỉ thêm thứ tự bộ phận)
+
+> Đã có tài liệu: [`engine_v0.0.2.md`](engine_v0.0.2.md) + [`.html`](engine_v0.0.2.html). Bước này
+> cố ý **chỉ làm một việc**: thêm partial-order. Vòng đời/GC automaton **không** làm ở đây — dời
+> sang cụm bindings + working-set (xem cuối mục).
 
 Thay `stage` tuyến tính bằng **bitmask tiến độ + `prereq_mask`** cho từng bước: một bước khớp được
-khi mọi bit tiền đề đã bật, không cần đúng vị trí tuần tự. Mỗi bước có **`seg_window`** — deadline
-riêng tính từ lúc tiền đề vừa đủ; automaton mà mọi bước kế tiếp đều đã quá hạn thì bị **GC** khỏi
-storyline. (`engine.md §6.1`, `§6.4`)
+khi mọi bit tiền đề đã bật (`prereq_mask ⊆ done_mask`), không cần đúng vị trí tuần tự. Automaton
+vẫn **bất tử như v0.0.1** (seed rồi không gỡ) — không đụng vòng đời. (`engine.md §6.1`)
 
 **Ưu điểm**
 - Chấp nhận thứ tự tự do / xen kẽ hợp lệ: chuỗi tấn công thật mà hai nhóm bước tới đảo thứ tự
@@ -69,16 +78,26 @@ storyline. (`engine.md §6.1`, `§6.4`)
   khử luôn kiểu bypass "đảo thứ tự bước để né rule".
 - "Nhóm tự do thứ tự", "mốc giữa hai nhóm", "bước tùy chọn" đều rơi ra từ một phép AND/OR trên
   machine word — chi phí per-event không đổi, không phải liệt kê hoán vị trong rule.
-- `seg_window` + GC là lần đầu tiên **automaton có vòng đời hữu hạn** — điều kiện tiên quyết cho
-  bước 5 (không có GC thì `refcount` không bao giờ được nhả).
+- Thay đổi **cô lập**: chỉ ruột `ADVANCE` đổi, `ON_EVENT`/`LINE`/`Storyline`/`DISARMED` giữ nguyên
+  — dễ kiểm chứng đúng đắn (automaton chỉ nặng thêm đúng một machine word `done_mask` so với `stage`).
 
 **Nhược điểm**
-- Automaton "rộng cửa" hơn (nhiều bước cùng chờ được khớp) → dễ tiến bộ phận trên hoạt động lành
-  tính hơn, sống lâu hơn → nhiều automaton dở dang. → *Khắc phục: chính `seg_window` GC trong cùng
-  bước này (chết theo deadline), và trần số automaton ở bước 6.*
+- **Nhược điểm bộ nhớ của v0.0.1 còn nguyên** — bản này không đụng tới mặt bộ nhớ automaton (số
+  instance seed vẫn theo tần suất khớp bước gốc, y v0.0.1; partial-order chỉ làm nhiều automaton
+  *tiến xa hơn*, không tăng *số lượng*). → *Khắc phục: cụm bindings (2) + BIND_IDX (3) + bounded
+  working-set (5) đưa vào cùng nhau — xem dưới.*
 - Khớp lỏng theo *loại* sự kiện, chưa ràng buộc *thực thể* → tăng nguy cơ ghép nhầm các event
   không liên quan trong cùng storyline thành một chuỗi. → *Khắc phục: bước 2 (bindings).*
 - Rule phức tạp hơn (viết `prereq_mask` thay vì dãy tuần tự) — chấp nhận, trả một lần lúc viết rule.
+
+**Vì sao vòng đời/GC automaton KHÔNG nằm ở bước này.** Cho automaton một vòng đời = trả lời "automaton
+còn có thể tiến không?", mà trả lời đúng cần biết **automaton phụ thuộc identity nào** — chỉ có sau
+khi có `bindings` (bước 2: bind `role → identity`) + `BIND_IDX` (bước 3). GC ngay ở đây buộc phải
+bịa một xấp xỉ thô (process seed, hay deadline thời gian kiểu `seg_window`) mà bindings sẽ **thay
+thế** ngay — làm rồi bỏ. Hơn nữa việc **thực thi trần** (giảm `refcount` khi automaton chết, kẹp
+`|working-set|`) là nội dung bước 5: refcount tăng lúc bind (bước 2), giảm lúc automaton GC — **hai
+nửa của cùng một bất biến**, phải dựng cùng nhau. ⟹ điều kiện GC automaton đi cùng cụm **2 + 3 + 5**,
+không tách riêng ra bước 1.
 
 # 2. Ràng buộc identity giữa các bước (`bindings`)
 
@@ -130,8 +149,8 @@ bind** được route thẳng tới automaton đó — bất kể actor của ev
 **Nhược điểm**
 - Thêm một bảng phải giữ **nhất quán tuyệt đối** với vòng đời automaton (bind → thêm entry, GC →
   gỡ entry); lệch là hoặc rò rỉ bộ nhớ hoặc automaton ma. → *Khắc phục: gỡ entry đặt trong đúng
-  một chỗ — hàm GC của bước 1; bước 5 ràng thêm bằng bất biến refcount (cùng một sự kiện nhả cả
-  hai).*
+  một chỗ — hàm GC automaton (điều kiện GC định nghĩa ở chính cụm này, cùng bindings); bước 5 ràng
+  thêm bằng bất biến refcount (cùng một sự kiện nhả cả hai).*
 - Chỉ thấy identity **đã bind trước đó** — không giúp gì cho tương quan giữa hai thứ chưa từng vào
   pattern nào. → *Khắc phục: đó là việc của storyline (đã có) và backend (bước 7).*
 
@@ -161,9 +180,15 @@ storyline. (`engine.md §5`, `IS_CAUSAL`)
 # 5. Bounded working-set
 
 `LINE[key]` hiện là con trỏ trần `key → Storyline`, sống mãi. Nâng thành bản ghi có thêm
-`refcount` (số automaton đang bind key này — tăng khi bind ở bước 2, giảm khi automaton bị GC ở
-bước 1) và `last_touch`. **Bất biến**: giữ key ⟺ `refcount > 0` ∨ `last_touch ≥ now − W`; hết cả
-hai thì sweep (lười, amortized) khỏi `LINE` và `Storyline.members`. (`engine.md §3`)
+`refcount` (số automaton đang bind key này — tăng khi bind ở bước 2, giảm khi automaton bị **GC**)
+và `last_touch`. **Bất biến**: giữ key ⟺ `refcount > 0` ∨ `last_touch ≥ now − W`; hết cả hai thì
+sweep (lười, amortized) khỏi `LINE` và `Storyline.members`. (`engine.md §3`)
+
+> **Điều kiện GC automaton chốt tại đây (cùng bước 2/3).** Bước 1 để automaton bất tử; giờ mới định
+> nghĩa cái chết của nó — theo **identity đã bind** (bước 2): automaton chết khi không bit kế nào
+> còn có thể commit *và* các identity nó ghim đã nguội/biến mất. Đây là chỗ "vòng đời" mà bản
+> `engine.md` gán cho `seg_window` được thay bằng một điều kiện dựa trên identity thật, ăn khớp với
+> `refcount` (cùng một sự kiện GC nhả cả refcount lẫn entry `BIND_IDX`).
 
 > **Cơ chế riêng cho `DISARMED`:** không dùng refcount/cửa sổ — mỗi entry mang TTL/lease riêng,
 > tự tan nếu không gia hạn, thay vì tước quyền actor vĩnh viễn. (`engine.md §9` — `ArmDirective.ttl`)
@@ -183,8 +208,10 @@ hai thì sweep (lười, amortized) khỏi `LINE` và `Storyline.members`. (`eng
   lặng. Đánh đổi có chủ đích, chỉnh bằng một núm `W`.*
 - `refcount` phải cân đối tuyệt đối với vòng đời automaton — lệch là ghim vĩnh viễn (leak) hoặc
   sweep nhầm thực thể đang cần. → *Khắc phục: tăng/giảm chỉ ở hai điểm (commit binding — bước 2,
-  GC automaton — bước 1), cùng chỗ với cập nhật `BIND_IDX` (bước 3) — một sự kiện, một chỗ sửa.*
-- Phụ thuộc cứng bước 1 + 2 (xem sơ đồ) — làm trước thì `refcount` vô nghĩa.
+  GC automaton — điều kiện GC định nghĩa ngay tại cụm này), cùng chỗ với cập nhật `BIND_IDX`
+  (bước 3) — một sự kiện, một chỗ sửa.*
+- Phụ thuộc cứng bước 2 (identity để định nghĩa GC + refcount) — làm trước thì `refcount` vô nghĩa.
+  Bước 1 (partial-order) độc lập, có thể làm trước hoặc song song.
 
 # 6. Trần kích thước storyline
 

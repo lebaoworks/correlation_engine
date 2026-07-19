@@ -1,12 +1,15 @@
-//! Regression: mọi bản engine phải cho verdict khớp kỳ vọng trên dataset
-//! docs/replay.md, và các bản phải cho verdict GIỐNG HỆT NHAU trên cùng
-//! một luồng event bất kỳ (khẳng định của engine_v0.0.1.md: bỏ graph không
-//! đổi kết quả phát hiện).
+//! Regression cho các bản engine:
+//! - base + v0.0.1 khớp verdict kỳ vọng trên dataset ĐÚNG thứ tự, và cho
+//!   verdict giống hệt nhau trên luồng event bất kỳ (bỏ graph không đổi detection).
+//! - v0.0.2 khớp verdict kỳ vọng trên dataset ĐẢO thứ tự.
+//! - Điểm mấu chốt: trên luồng đảo thứ tự, v0.0.1 (tuyến tính) BỎ LỌT chuỗi
+//!   mà v0.0.2 (DAG) bắt được.
 
-use engine_core::{base, v0_0_1, Detector, Event, Key, Kind, Op, Ttp};
+use engine_core::{base, v0_0_1, Detector, Event, Key, Kind, Op, Ttp, Verdict};
+use engine_replay::Case;
 
-fn assert_scenario(engine: &mut dyn Detector, label: &str) {
-    for o in engine_replay::replay(engine) {
+fn assert_scenario(engine: &mut dyn Detector, dataset: Vec<Case>, label: &str) {
+    for o in engine_replay::replay(engine, dataset) {
         assert_eq!(
             o.actual, o.case.expect,
             "[{label}] ts={} — {}",
@@ -16,20 +19,58 @@ fn assert_scenario(engine: &mut dyn Detector, label: &str) {
 }
 
 #[test]
-fn scenario_matches_on_base() {
-    assert_scenario(&mut base::Engine::new(engine_replay::compiled_rules()), "base");
+fn linear_scenario_on_base() {
+    assert_scenario(
+        &mut base::Engine::new(engine_replay::linear_rules()),
+        engine_replay::linear_dataset(),
+        "base",
+    );
 }
 
 #[test]
-fn scenario_matches_on_v0_0_1() {
-    assert_scenario(&mut v0_0_1::Engine::new(engine_replay::compiled_rules()), "v0.0.1");
+fn linear_scenario_on_v0_0_1() {
+    assert_scenario(
+        &mut v0_0_1::Engine::new(engine_replay::linear_rules()),
+        engine_replay::linear_dataset(),
+        "v0.0.1",
+    );
 }
 
-/// Test vi sai: bơm một luồng event giả ngẫu nhiên (deterministic) qua cả hai
-/// bản, verdict phải trùng nhau từng event một.
+#[test]
+fn reordered_scenario_on_v0_0_2() {
+    // engine_core::Engine = v0.0.2
+    assert_scenario(
+        &mut engine_core::Engine::new(engine_replay::dag_rules()),
+        engine_replay::dag_dataset(),
+        "v0.0.2",
+    );
+}
+
+/// Kịch bản chính của bước này: cùng luồng event ĐẢO thứ tự, v0.0.1 tuyến tính
+/// bỏ lọt (không disarm/block), v0.0.2 DAG bắt trọn (disarm rồi block).
+#[test]
+fn v0_0_1_misses_reordered_chain_that_v0_0_2_catches() {
+    let events = engine_replay::dag_dataset();
+
+    let mut v1 = v0_0_1::Engine::new(engine_replay::linear_rules());
+    let v1_verdicts: Vec<Verdict> =
+        events.iter().map(|c| v1.on_event(&c.event, &c.ttps)).collect();
+    assert!(
+        !v1_verdicts.iter().any(|v| matches!(v, Verdict::Disarm | Verdict::Block)),
+        "v0.0.1 tuyến tính lẽ ra bỏ lọt chuỗi đảo thứ tự, nhưng phản ứng: {v1_verdicts:?}",
+    );
+
+    let mut v2 = engine_core::Engine::new(engine_replay::dag_rules());
+    let v2_verdicts: Vec<Verdict> =
+        events.iter().map(|c| v2.on_event(&c.event, &c.ttps)).collect();
+    assert!(v2_verdicts.contains(&Verdict::Disarm), "v0.0.2 phải disarm: {v2_verdicts:?}");
+    assert!(v2_verdicts.contains(&Verdict::Block), "v0.0.2 phải block: {v2_verdicts:?}");
+}
+
+/// Test vi sai base ↔ v0.0.1: cùng luồng event giả ngẫu nhiên (deterministic),
+/// verdict và storyline phải trùng nhau từng event (bỏ graph không đổi detection).
 #[test]
 fn base_and_v0_0_1_verdicts_are_identical() {
-    // rule riêng cho fuzz: phủ cả block lẫn disarm, cả bước khớp mọi op
     let src = "\
 pattern fuzz_a
     step ops=exec ttps=T1059
@@ -45,7 +86,6 @@ end
     let mut base = base::Engine::new(rules.clone());
     let mut v001 = v0_0_1::Engine::new(rules);
 
-    // LCG deterministic — không kéo dependency random nào
     let mut seed: u64 = 0x243F_6A88_85A3_08D3;
     let mut next = move || {
         seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
@@ -62,7 +102,6 @@ end
         let actor = Key((next() % 24) as u128);
         let object = Key((next() % 24) as u128);
         let op = OPS[(next() % OPS.len() as u64) as usize];
-        // 0..=2 TTP mỗi event
         let mut ttps = Vec::new();
         for _ in 0..(next() % 3) {
             let t = Ttp(TTPS[(next() % TTPS.len() as u64) as usize]);
@@ -81,31 +120,15 @@ end
         let vb = base.on_event(&e, &ttps);
         let vv = v001.on_event(&e, &ttps);
         assert_eq!(vb, vv, "lệch verdict tại event #{i}: {e:?} ttps={ttps:?}");
-        // hai bản phải cùng nhìn thấy một storyline cho actor này
         let mb: Vec<Key> = base.storyline_of(actor).map(|it| it.collect()).unwrap_or_default();
         let mv: Vec<Key> = v001.storyline_of(actor).map(|it| it.collect()).unwrap_or_default();
         assert_eq!(mb, mv, "lệch storyline tại event #{i}");
     }
-
-    // luồng có chứa write+T1486 sau chuỗi khớp → chắc chắn đã có disarm nổ;
-    // sanity: cả hai bản phải đã trả ít nhất một verdict ≠ Ignore ở trên
-    // (nếu không, test này không phủ được gì — báo bằng verdict cuối cùng)
-    let probe = Event {
-        ts: 5000,
-        op: Op::Exec,
-        actor: Key(0),
-        actor_kind: Kind::Process,
-        object: Key(1),
-        object_kind: Kind::File,
-    };
-    assert_eq!(
-        base.on_event(&probe, &[Ttp(1059)]),
-        v001.on_event(&probe, &[Ttp(1059)]),
-    );
 }
 
+/// `run()` mặc định (v0.0.2 trên dataset DAG) — khớp verdict kỳ vọng từng event.
 #[test]
-fn ransomware_fast_encrypt_linear_scenario() {
+fn default_run_matches_expected() {
     for o in engine_replay::run() {
         assert_eq!(
             o.actual, o.case.expect,
