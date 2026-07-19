@@ -3,9 +3,16 @@
 #   proto/            contract trao đổi endpoint-service ↔ backend-service (wire.proto + codec)
 #   endpoint_service/ console app cầu nối sensor(kernel) ↔ engine, ship wire lên backend
 #   backend_service/  console app giữ full provenance graph, hiển thị storyline khi có alert
+# Loạt engine mới (implement theo docs/engine_base.md → engine_v*):
+#   engine_core/      lõi phát hiện no_std+alloc, zero-dep (usermode + kernel mode)
+#   engine_rules/     compile rule text → RuleSet/bytes cho engine_core
+#   engine_replay/    regression test: dataset docs/replay.md + rule qua engine_core
 [workspace]
 resolver = "2"
-members = ["engine", "proto", "endpoint_service", "backend_service"]
+members = [
+    "engine", "proto", "endpoint_service", "backend_service",
+    "engine_core", "engine_rules", "engine_replay",
+]
 # sensor/windows_driver là crate kernel `no_std` (nightly, target windows-msvc,
 # build bằng cargo-make + WDK) — không thuộc workspace std/cross-platform này.
 exclude = ["bak", "sensor/windows_driver"]

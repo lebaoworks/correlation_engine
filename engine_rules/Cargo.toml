@@ -1,0 +1,8 @@
+[package]
+name = "engine_rules"
+version = "0.1.0"
+edition = "2021"
+
+# Compiler rule text → RuleSet/bytes cho engine_core (usermode, std).
+[dependencies]
+engine_core = { path = "../engine_core" }

@@ -1,0 +1,12 @@
+# ransomware_fast_encrypt_linear — docs/replay.md
+# Bước không mang action= là bước chỉ báo hiệu: khớp thì engine trả inspect.
+# 0: chạy LOLBin bất thường            → ghi nhận, theo dõi thêm
+# 1: do thám, liệt kê thư mục/file     → tăng cảnh giác, log chi tiết
+# 2: vô hiệu hoá backup (Shadow Copy)  → cảnh báo SOC, chuẩn bị chặn
+# 3: ghi hàng loạt entropy cao         → chặn ngay + cô lập tiến trình
+pattern ransomware_fast_encrypt_linear
+    step ops=exec ttps=T1059
+    step ops=read ttps=T1083
+    step ops=exec ttps=T1490
+    step ops=write ttps=T1486 action=disarm(write,exec,create,inject,connect)
+end

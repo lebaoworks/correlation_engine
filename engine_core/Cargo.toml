@@ -1,0 +1,8 @@
+[package]
+name = "engine_core"
+version = "0.1.0"
+edition = "2021"
+
+# Lõi phát hiện theo docs/engine_base.md — no_std + alloc, zero-dep,
+# dùng được cả usermode lẫn kernel mode (kernel cấp allocator).
+[dependencies]

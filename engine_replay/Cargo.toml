@@ -1,0 +1,10 @@
+[package]
+name = "engine_replay"
+version = "0.1.0"
+edition = "2021"
+
+# Bộ regression: dataset (docs/replay.md) + rule, chạy qua engine_core,
+# assert verdict từng event.
+[dependencies]
+engine_core = { path = "../engine_core" }
+engine_rules = { path = "../engine_rules" }
