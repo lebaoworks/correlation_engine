@@ -5,7 +5,7 @@
 //! TTP của mỗi event nằm sẵn trong dataset: tagger là lớp platform-specific
 //! (engine.md §6.0), ngoài phạm vi core — replay giả lập đầu ra của nó.
 
-use engine_core::{Engine, Event, Key, Kind, Op, Ttp, Verdict};
+use engine_core::{Detector, Engine, Event, Key, Kind, Op, RuleSet, Ttp, Verdict};
 
 pub const RULES: &str = include_str!("../rules/ransomware.rules");
 
@@ -105,12 +105,15 @@ pub fn dataset() -> Vec<Case> {
     ]
 }
 
-/// Compile rule (đi vòng qua wire format để phủ luôn đường giao rule cho
-/// kernel), replay toàn bộ dataset, trả kết quả từng event.
-pub fn run() -> Vec<Outcome> {
+/// Compile rule nguồn, đi vòng qua wire format để phủ luôn đường giao rule
+/// cho kernel.
+pub fn compiled_rules() -> RuleSet {
     let bytes = engine_rules::compile_to_bytes(RULES).expect("rule nguồn phải hợp lệ");
-    let rules = engine_core::wire::decode(&bytes).expect("wire roundtrip phải hợp lệ");
-    let mut engine = Engine::new(rules);
+    engine_core::wire::decode(&bytes).expect("wire roundtrip phải hợp lệ")
+}
+
+/// Replay toàn bộ dataset qua một bản engine bất kỳ, trả kết quả từng event.
+pub fn replay(engine: &mut dyn Detector) -> Vec<Outcome> {
     dataset()
         .into_iter()
         .map(|case| {
@@ -118,4 +121,9 @@ pub fn run() -> Vec<Outcome> {
             Outcome { case, actual }
         })
         .collect()
+}
+
+/// Replay qua bản engine hiện hành (`engine_core::Engine`).
+pub fn run() -> Vec<Outcome> {
+    replay(&mut Engine::new(compiled_rules()))
 }

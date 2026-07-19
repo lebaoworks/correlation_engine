@@ -1,51 +1,30 @@
-//! Vòng lặp chính per-event (`engine_base.md §3–§5`).
+//! Bản v0.0.1 (`engine_v0.0.1.md`): bỏ hẳn provenance graph (`Node`, `Edge`,
+//! `GRAPH.edges`) — chỉ còn `LINE` (định danh → storyline hiện hành),
+//! storyline, automaton và `DISARMED`.
+//!
+//! Đường phát hiện (`UNIFY_STORYLINE`, `ADVANCE`) chưa từng đọc cạnh nào ở
+//! bản base, nên hai bản cho verdict **giống hệt nhau** trên cùng luồng event
+//! (test vi sai ở `engine_replay`); cái mất chỉ là dữ liệu forensic
+//! ("ai làm gì với ai theo thứ tự nào" — `engine_v0.0.1.md §8`).
 
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 
-use crate::event::{Event, Key, Kind, Op, OpSet, Ttp};
-use crate::rules::{Action, RuleSet, Step};
+use crate::detector::{apply, Detector, Verdict};
+use crate::event::{Event, Key, OpSet, Ttp};
+use crate::rules::RuleSet;
 
-/// Verdict của MỘT event — phản ứng mạnh nhất trong các bước vừa kích hoạt
-/// tại đúng event đó (`engine_base.md §5`): `ignore < inspect < block < disarm`.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
-pub enum Verdict {
-    /// Event vô hại/vô dụng: không kích hoạt bước nào của pattern nào.
-    Ignore,
-    /// Event vừa kích hoạt (seed hoặc tiến) ít nhất một bước pattern,
-    /// nhưng không bước nào mang hành vi cưỡng chế.
-    Inspect,
-    Block,
-    Disarm,
-}
-
-/// Node của provenance graph — sống mãi, không bao giờ bị gỡ (§2).
-struct Node {
-    #[allow(dead_code)] // giữ theo §2; bản base chưa có đường đọc lại kind
-    kind: Kind,
-    /// Chỉ số storyline hiện hành trong `Engine::storylines`.
-    line: Option<usize>,
-}
-
-/// Cạnh — mỗi event sinh đúng một cạnh, lưu vĩnh viễn (§2, phục vụ forensic).
-#[derive(Clone, Copy, Debug)]
-pub struct Edge {
-    pub from: Key,
-    pub to: Key,
-    pub op: Op,
-    pub ts: u64,
-}
-
-/// Tiến độ khớp một pattern, tuyến tính (§2).
+/// Tiến độ khớp một pattern, tuyến tính — không đổi so với bản base (§3).
 #[derive(Clone, Copy, Debug)]
 struct Automaton {
     /// Số bước đã khớp: 0..=len(steps), tăng dần 1-1.
     stage: usize,
-    #[allow(dead_code)] // §2: mốc thời gian khớp gần nhất; GC dùng ở engine_v* sau
+    #[allow(dead_code)] // §3: mốc thời gian khớp gần nhất; GC dùng ở engine_v* sau
     stage_ts: u64,
 }
 
-/// Storyline = thành phần liên thông của graph (§2, §4).
+/// Storyline — không đổi so với bản base (§3): thành phần liên thông theo
+/// `LINE`, không cần đồ thị để biết ai-nối-ai.
 struct Storyline {
     members: BTreeSet<Key>,
     /// `pattern_id` (chỉ số trong ruleset) → các instance đang sống.
@@ -53,14 +32,16 @@ struct Storyline {
     last_activity: u64,
 }
 
-/// Engine bản base: giữ mọi node, cạnh, automaton từ lúc khởi động (§1).
+/// Engine v0.0.1: bộ nhớ tăng theo số định danh distinct đã chạm tới,
+/// không theo tổng số event (§7).
 pub struct Engine {
     rules: RuleSet,
-    nodes: BTreeMap<Key, Node>,
-    edges: Vec<Edge>,
-    /// Slot đã merge thành `None`; storyline không bao giờ bị xoá vì lý do khác.
+    /// `LINE`: định danh → chỉ số storyline hiện hành (thay cho `Node.line`).
+    /// Không mang `kind`, không mang lịch sử (§3).
+    line: BTreeMap<Key, usize>,
+    /// Slot đã merge thành `None`.
     storylines: Vec<Option<Storyline>>,
-    /// `DISARMED`: actor → tập op đã bị tước quyền, hiệu lực vĩnh viễn (§2).
+    /// `DISARMED`: actor → tập op đã bị tước quyền, hiệu lực vĩnh viễn (§3).
     disarmed: BTreeMap<Key, OpSet>,
 }
 
@@ -68,61 +49,46 @@ impl Engine {
     pub fn new(rules: RuleSet) -> Self {
         Engine {
             rules,
-            nodes: BTreeMap::new(),
-            edges: Vec::new(),
+            line: BTreeMap::new(),
             storylines: Vec::new(),
             disarmed: BTreeMap::new(),
         }
     }
 
-    /// `ON_EVENT` (§3). `ttps` do tagger platform-specific bên ngoài gán.
+    /// `ON_EVENT` (§4): không còn `RESOLVE_NODE`, không còn `edges.append`.
     pub fn on_event(&mut self, e: &Event, ttps: &[Ttp]) -> Verdict {
-        // DISARMED đứng trước mọi bước khác: op đã bị tước quyền thì event
-        // không bao giờ tới được graph/storyline/automaton (§3).
+        // DISARMED đứng trước mọi bước khác — chặn thẳng, không chạm LINE/automaton.
         if let Some(ops) = self.disarmed.get(&e.actor) {
             if ops.contains(e.op) {
                 return Verdict::Block;
             }
         }
 
-        self.resolve_node(e.actor, e.actor_kind);
-        self.resolve_node(e.object, e.object_kind);
-
-        self.edges.push(Edge { from: e.actor, to: e.object, op: e.op, ts: e.ts });
-
         let s = self.unify_storyline(e.actor, e.object);
 
         self.advance(s, e, ttps)
     }
 
-    /// Cạnh forensic tích lũy từ lúc khởi động ("ai làm gì với ai", §2).
-    pub fn edges(&self) -> &[Edge] {
-        &self.edges
-    }
-
     /// Tập member của storyline đang chứa `key`, nếu có.
     pub fn storyline_of(&self, key: Key) -> Option<impl Iterator<Item = Key> + '_> {
-        let line = self.nodes.get(&key)?.line?;
+        let line = *self.line.get(&key)?;
         Some(self.storylines[line].as_ref().unwrap().members.iter().copied())
     }
 
-    /// get-or-create trong `GRAPH.nodes` (§3).
-    fn resolve_node(&mut self, key: Key, kind: Kind) {
-        self.nodes.entry(key).or_insert(Node { kind, line: None });
-    }
-
-    /// `UNIFY_STORYLINE` (§4): mọi cạnh — bất kể op — đều gộp storyline.
+    /// `UNIFY_STORYLINE` (§5): mọi cạnh — bất kể op — vẫn gộp storyline,
+    /// giống hệt bản base; chỉ khác là không giữ lại cạnh nào để giải thích.
     fn unify_storyline(&mut self, a: Key, o: Key) -> usize {
-        let sa = self.line_or_new(a);
-        let so = self.line_or_new(o);
+        let sa = self.resolve_line(a);
+        let so = self.resolve_line(o);
         if sa != so {
             self.merge(sa, so);
         }
-        self.nodes[&a].line.unwrap()
+        self.line[&a]
     }
 
-    fn line_or_new(&mut self, key: Key) -> usize {
-        if let Some(line) = self.nodes[&key].line {
+    /// `RESOLVE_LINE` (§5): lần đầu chạm tới thì gán vào storyline mới.
+    fn resolve_line(&mut self, key: Key) -> usize {
+        if let Some(&line) = self.line.get(&key) {
             return line;
         }
         let mut members = BTreeSet::new();
@@ -133,11 +99,12 @@ impl Engine {
             last_activity: 0,
         }));
         let line = self.storylines.len() - 1;
-        self.nodes.get_mut(&key).unwrap().line = Some(line);
+        self.line.insert(key, line);
         line
     }
 
-    /// `MERGE` (§4): dời members/automata của tập nhỏ vào tập lớn (union-by-size).
+    /// `MERGE` (§5): dời members/automata sang tập lớn hơn; với mỗi key vừa
+    /// dời, cập nhật `LINE[k]` = storyline đích.
     fn merge(&mut self, x: usize, y: usize) {
         let (dst, src) = {
             let lx = self.storylines[x].as_ref().unwrap().members.len();
@@ -146,7 +113,7 @@ impl Engine {
         };
         let moved = self.storylines[src].take().unwrap();
         for k in &moved.members {
-            self.nodes.get_mut(k).unwrap().line = Some(dst);
+            self.line.insert(*k, dst);
         }
         let d = self.storylines[dst].as_mut().unwrap();
         d.members.extend(moved.members);
@@ -156,7 +123,8 @@ impl Engine {
         d.last_activity = d.last_activity.max(moved.last_activity);
     }
 
-    /// `ADVANCE` (§5): seed + tiến automaton tuyến tính, trả verdict của event.
+    /// `ADVANCE` (§6) — giữ NGUYÊN VẸN logic bản base: nó chưa từng phụ thuộc
+    /// `GRAPH`, nên bỏ graph không phải sửa một dòng nào ở đây.
     fn advance(&mut self, s: usize, e: &Event, ttps: &[Ttp]) -> Verdict {
         let Engine { rules, storylines, disarmed, .. } = self;
         let line = storylines[s].as_mut().unwrap();
@@ -191,24 +159,17 @@ impl Engine {
     }
 }
 
-/// `APPLY` (§5): bước vừa kích hoạt → verdict. Không action ⇒ chỉ báo hiệu
-/// (`inspect`); disarm tước quyền actor TỪ BÂY GIỜ, vĩnh viễn.
-fn apply(step: &Step, actor: Key, disarmed: &mut BTreeMap<Key, OpSet>) -> Verdict {
-    match step.action {
-        None => Verdict::Inspect,
-        Some(Action::Block) => Verdict::Block,
-        Some(Action::Disarm(ops)) => {
-            let entry = disarmed.entry(actor).or_default();
-            *entry = entry.union(ops);
-            Verdict::Disarm
-        }
+impl Detector for Engine {
+    fn on_event(&mut self, e: &Event, ttps: &[Ttp]) -> Verdict {
+        Engine::on_event(self, e, ttps)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rules::{Pattern, Step, StepMatch};
+    use crate::event::{Kind, Op};
+    use crate::rules::{Action, Pattern, Step, StepMatch};
     use alloc::string::ToString;
     use alloc::vec;
 
@@ -244,36 +205,20 @@ mod tests {
     #[test]
     fn linear_advance_then_disarm_blocks_forever() {
         let mut eng = Engine::new(one_pattern());
-        // bước 0 seed
         assert_eq!(eng.on_event(&ev(1, Op::Exec, 10, 11), &[Ttp(1)]), Verdict::Inspect);
-        // event không khớp bước kế → ignore
         assert_eq!(eng.on_event(&ev(2, Op::Read, 10, 12), &[]), Verdict::Ignore);
-        // bước 1 khớp → disarm(write)
         assert_eq!(eng.on_event(&ev(3, Op::Write, 10, 13), &[Ttp(2)]), Verdict::Disarm);
-        // từ nay mọi write của actor 10 bị chặn thẳng, không chạm automaton
         assert_eq!(eng.on_event(&ev(4, Op::Write, 10, 14), &[]), Verdict::Block);
-        // op khác không bị tước quyền thì vẫn qua
         assert_eq!(eng.on_event(&ev(5, Op::Read, 10, 14), &[]), Verdict::Ignore);
-    }
-
-    #[test]
-    fn steps_must_match_in_order() {
-        let mut eng = Engine::new(one_pattern());
-        // bước 1 tới trước khi automaton tồn tại → không có gì khớp
-        assert_eq!(eng.on_event(&ev(1, Op::Write, 10, 11), &[Ttp(2)]), Verdict::Ignore);
-        assert_eq!(eng.on_event(&ev(2, Op::Exec, 10, 12), &[Ttp(1)]), Verdict::Inspect);
     }
 
     #[test]
     fn storylines_merge_and_share_automata() {
         let mut eng = Engine::new(one_pattern());
-        // storyline A: actor 10 seed automaton
         assert_eq!(eng.on_event(&ev(1, Op::Exec, 10, 11), &[Ttp(1)]), Verdict::Inspect);
-        // storyline B: actor 20 chưa liên quan
         assert_eq!(eng.on_event(&ev(2, Op::Read, 20, 21), &[]), Verdict::Ignore);
-        // cạnh 10→21 gộp A và B; actor 20 giờ cùng storyline với automaton
+        // cạnh 10→21 gộp hai storyline; actor 20 tiến automaton do 10 seed
         assert_eq!(eng.on_event(&ev(3, Op::Read, 10, 21), &[]), Verdict::Ignore);
-        // actor 20 tiến bước 1 của automaton do 10 seed
         assert_eq!(eng.on_event(&ev(4, Op::Write, 20, 22), &[Ttp(2)]), Verdict::Disarm);
         let members: Vec<Key> = eng.storyline_of(Key(10)).unwrap().collect();
         for k in [10u128, 11, 20, 21, 22] {
@@ -282,10 +227,13 @@ mod tests {
     }
 
     #[test]
-    fn edges_accumulate_one_per_event() {
+    fn memory_tracks_distinct_keys_not_events() {
         let mut eng = Engine::new(one_pattern());
-        eng.on_event(&ev(1, Op::Exec, 10, 11), &[]);
-        eng.on_event(&ev(2, Op::Read, 10, 12), &[]);
-        assert_eq!(eng.edges().len(), 2);
+        // cùng một cặp (actor, object) lặp nhiều event → LINE chỉ có 2 mục (§7)
+        for ts in 0..100 {
+            eng.on_event(&ev(ts, Op::Read, 10, 11), &[]);
+        }
+        assert_eq!(eng.line.len(), 2);
+        assert_eq!(eng.storyline_of(Key(10)).unwrap().count(), 2);
     }
 }
