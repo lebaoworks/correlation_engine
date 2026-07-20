@@ -22,6 +22,7 @@ namespace Event
         // File related events 1-99
         FileOpen = 1,   // reserved: capture currently disabled (nop), kept for later
         FileWrite = 2,  // first write to a file (per handle) — enforceable chokepoint
+        FileRead = 3,   // directory enumeration (recon, T1083) — QUERY_DIRECTORY, per handle
 
         // Process related events 100-199
         ProcessCreate = 100,
@@ -251,6 +252,11 @@ namespace Event
     struct FileWriteEvent : public Event
     {
         String FileName;
+        // Nội dung ghi có entropy cao (nghi mã hoá/nén — ransomware). Đặt bởi
+        // MiniFilter::EmitFirstWrite bằng proxy nguyên (không FP kernel). Engine
+        // tagger đọc cờ này để gán T1486. Không serialize (đường engine đọc object
+        // trực tiếp; ring là forensic).
+        bool HighEntropy = false;
 
         FileWriteEvent() noexcept { Type = Types::FileWrite; }
 
@@ -263,6 +269,36 @@ namespace Event
             if (BufferSize < PayloadSize_())
                 return STATUS_BUFFER_TOO_SMALL;
 
+            WriteString((BYTE*)Buffer, FileName);
+            return STATUS_SUCCESS;
+        }
+
+        virtual ULONG PayloadSize_() const override
+        {
+            return StringSize(FileName);
+        }
+    };
+
+    /* FileRead record: directory enumeration (recon / T1083). Wire::Header
+       (identity = the enumerating process) ++ FileName (the directory). Emitted
+       once per handle on QUERY_DIRECTORY. Same layout as FileWrite/FileOpen. */
+    struct FileReadEvent : public Event
+    {
+        String FileName;
+        // Event này LÀ một lần liệt kê thư mục (tín hiệu T1083). Cờ tường minh để
+        // tagger đọc; không serialize (đường engine đọc object trực tiếp).
+        bool DirEnum = true;
+
+        FileReadEvent() noexcept { Type = Types::FileRead; }
+
+        virtual ~FileReadEvent() {}
+
+        virtual NTSTATUS Serialize_(
+            _Inout_ PVOID Buffer,
+            _In_ ULONG BufferSize) const override
+        {
+            if (BufferSize < PayloadSize_())
+                return STATUS_BUFFER_TOO_SMALL;
             WriteString((BYTE*)Buffer, FileName);
             return STATUS_SUCCESS;
         }

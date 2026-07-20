@@ -19,6 +19,7 @@ static PFLT_FILTER GlobalFilter = NULL;   // for FltAllocateContext on the write
 // The shared telemetry ring. Registered/unregistered on the port's connect and
 // disconnect, and reached from the control path (both live in this file).
 static Ring::Buffer* GlobalRing = nullptr;
+static Engine::Instance* GlobalEngine = nullptr;
 #pragma data_seg()
 
 
@@ -103,6 +104,35 @@ namespace MiniFilter
     // pre-op below only calls it after confirming IRQL == PASSIVE and non-paging I/O.
     _IRQL_requires_(PASSIVE_LEVEL)
     _IRQL_requires_same_
+    // Proxy entropy NGUYÊN (không FP kernel): index-of-coincidence trên histogram
+    // byte. Dữ liệu mã hoá/nén phân bố ~đều → Σcᵢ² nhỏ (≈ n²/256); văn bản/zero →
+    // Σcᵢ² lớn. Cao entropy ⟺ IC < 1/64 ⟺ Σcᵢ²·64 < n². Lấy mẫu ≤ 4KB.
+    static bool IsHighEntropy(_In_reads_bytes_(len) const BYTE* buf, _In_ ULONG len)
+    {
+        if (buf == nullptr)
+            return false;
+        ULONG n = len < 4096 ? len : 4096;
+        if (n < 256)
+            return false; // quá ngắn để phán
+        ULONG hist[256] = {};
+        for (ULONG i = 0; i < n; i++)
+            hist[buf[i]]++;
+        UINT64 sumsq = 0;
+        for (ULONG i = 0; i < 256; i++)
+            sumsq += (UINT64)hist[i] * hist[i];
+        return sumsq * 64 < (UINT64)n * n;
+    }
+
+    // Đọc buffer có thể chạm vùng nhớ không hợp lệ → bọc SEH, fail-safe = false.
+    // Hàm riêng, không có object C++ (tránh C2712 khi trộn SEH với unwind).
+    static bool SafeHighEntropy(_In_opt_ const BYTE* buf, _In_ ULONG len)
+    {
+        bool result = false;
+        __try { result = IsHighEntropy(buf, len); }
+        __except (EXCEPTION_EXECUTE_HANDLER) { result = false; }
+        return result;
+    }
+
     static FLT_PREOP_CALLBACK_STATUS EmitFirstWrite(
         _Inout_ PFLT_CALLBACK_DATA Data)
     {
@@ -118,30 +148,41 @@ namespace MiniFilter
         // Acting identity (pid + create time) is filled by the base Event ctor.
         event.FileName = name_info->Name;
 
+        // Entropy của nội dung ghi (→ tagger T1486). Buffer lấy qua MDL (an toàn ở
+        // mọi context) hoặc WriteBuffer; đọc bọc SEH nên không bao giờ crash.
+        {
+            const BYTE* wbuf = nullptr;
+            ULONG wlen = Data->Iopb->Parameters.Write.Length;
+            if (Data->Iopb->Parameters.Write.MdlAddress != nullptr)
+                wbuf = (const BYTE*)MmGetSystemAddressForMdlSafe(
+                    Data->Iopb->Parameters.Write.MdlAddress, NormalPagePriority | MdlMappingNoExecute);
+            else
+                wbuf = (const BYTE*)Data->Iopb->Parameters.Write.WriteBuffer;
+            event.HighEntropy = SafeHighEntropy(wbuf, wlen);
+        }
+
         ULONG pid = event.ProcessId;
-        INT64 start_ms = event.ProcessCreateTime.QuadPart / 10000;
 
         // One of the two captured event types (with ProcessOpen) — log at info.
         TraceEvents(TRACE_LEVEL_INFORMATION, TRACE_DRIVER, "MiniFilter: first write pid=%lu file=%wZ", pid, &name_info->Name);
 
-        // Armed write identity → enforce synchronously; deny fails the write.
+        // Feed EVERY first-write to the in-kernel engine (via GlobalEnforce): the
+        // engine advances on every event, not only armed ones. Deny (fail the write)
+        // if its verdict is BLOCK/DISARM. Also ship async telemetry for forensic.
         bool exempt = (GlobalArms != nullptr) && GlobalArms->IsServicePid(pid);
-        if (!exempt && GlobalArms != nullptr && GlobalEnforce != nullptr &&
-            GlobalArms->IsArmed(pid, start_ms, Arm::OP_WRITE))
+        if (GlobalEventCallback != nullptr)
+            GlobalEventCallback(event); // forensic telemetry
+        if (!exempt && GlobalEnforce != nullptr)
         {
             bool deny = false;
-            GlobalEnforce(event, &deny); // publishes to the ring and waits for the verdict
+            GlobalEnforce(event, &deny); // feed engine inline, take its verdict
             if (deny)
             {
                 Data->IoStatus.Status = STATUS_ACCESS_DENIED;
                 Data->IoStatus.Information = 0;
-                TraceEvents(TRACE_LEVEL_WARNING, TRACE_DRIVER, "MiniFilter: DENIED first write pid=%lu", pid);
+                TraceEvents(TRACE_LEVEL_WARNING, TRACE_DRIVER, "MiniFilter: DENIED first write pid=%lu (engine)", pid);
                 return FLT_PREOP_COMPLETE; // block the write
             }
-        }
-        else if (GlobalEventCallback != nullptr)
-        {
-            GlobalEventCallback(event); // async telemetry
         }
         return FLT_PREOP_SUCCESS_NO_CALLBACK;
     }
@@ -185,6 +226,66 @@ namespace MiniFilter
         return EmitFirstWrite(Data);
     }
 
+    // Emit a directory-enumeration (recon / T1083) event and feed the engine.
+    // A listing is a SIGNAL, not an enforceable chokepoint — advance the engine but
+    // never deny (we do not fail directory queries).
+    static FLT_PREOP_CALLBACK_STATUS EmitDirEnum(_Inout_ PFLT_CALLBACK_DATA Data)
+    {
+        PFLT_FILE_NAME_INFORMATION name_info = NULL;
+        if (FltGetFileNameInformation(Data, FLT_FILE_NAME_NORMALIZED | FLT_FILE_NAME_QUERY_DEFAULT, &name_info) != STATUS_SUCCESS)
+            return FLT_PREOP_SUCCESS_NO_CALLBACK;
+        defer{ FltReleaseFileNameInformation(name_info); };
+
+        Event::FileReadEvent event;
+        event.FileName = name_info->Name;
+        ULONG pid = event.ProcessId;
+
+        TraceEvents(TRACE_LEVEL_INFORMATION, TRACE_DRIVER, "MiniFilter: dir enum pid=%lu dir=%wZ", pid, &name_info->Name);
+
+        bool exempt = (GlobalArms != nullptr) && GlobalArms->IsServicePid(pid);
+        if (GlobalEventCallback != nullptr)
+            GlobalEventCallback(event); // forensic telemetry
+        if (!exempt && GlobalEnforce != nullptr)
+        {
+            bool deny = false;
+            GlobalEnforce(event, &deny); // advance engine; reads are not denied
+        }
+        return FLT_PREOP_SUCCESS_NO_CALLBACK;
+    }
+
+    // IRP_MJ_DIRECTORY_CONTROL pre-op: fire once per handle on the first
+    // QUERY_DIRECTORY (collapse the many query calls of one listing to one event).
+    _IRQL_requires_max_(APC_LEVEL)
+    _IRQL_requires_same_
+    FLT_PREOP_CALLBACK_STATUS FLTAPI FilterOperation_Pre_DirCtrl(
+        _Inout_ PFLT_CALLBACK_DATA Data,
+        _In_    PCFLT_RELATED_OBJECTS FltObjects,
+        _Out_   PVOID* CompletionContext)
+    {
+        *CompletionContext = NULL;
+
+        if (KeGetCurrentIrql() != PASSIVE_LEVEL)                    return FLT_PREOP_SUCCESS_NO_CALLBACK;
+        if (Data->Iopb->MinorFunction != IRP_MN_QUERY_DIRECTORY)   return FLT_PREOP_SUCCESS_NO_CALLBACK;
+        if (FltObjects->FileObject == NULL)                        return FLT_PREOP_SUCCESS_NO_CALLBACK;
+
+        // One enum event per handle (same one-shot marker as the write path).
+        PVOID existing = NULL;
+        if (FltGetStreamHandleContext(FltObjects->Instance, FltObjects->FileObject, &existing) == STATUS_SUCCESS)
+        {
+            FltReleaseContext(existing);
+            return FLT_PREOP_SUCCESS_NO_CALLBACK;
+        }
+        PVOID marker = NULL;
+        if (GlobalFilter != NULL &&
+            FltAllocateContext(GlobalFilter, FLT_STREAMHANDLE_CONTEXT, sizeof(BYTE), NonPagedPool, &marker) == STATUS_SUCCESS)
+        {
+            *(BYTE*)marker = 1;
+            FltSetStreamHandleContext(FltObjects->Instance, FltObjects->FileObject, FLT_SET_CONTEXT_KEEP_IF_EXISTS, marker, NULL);
+            FltReleaseContext(marker);
+        }
+        return EmitDirEnum(Data);
+    }
+
     #pragma data_seg("NONPAGED")
     static const FLT_CONTEXT_REGISTRATION FilterContextRegistration[] = {
         {
@@ -211,6 +312,12 @@ namespace MiniFilter
             IRP_MJ_WRITE,                                   //  MajorFunction
             FLTFL_OPERATION_REGISTRATION_SKIP_PAGING_IO,    //  Flags: skip paging I/O
             FilterOperation_Pre_Write,                      //  PreOperation
+            NULL,                                           //  PostOperation
+        },
+        {
+            IRP_MJ_DIRECTORY_CONTROL,                       //  MajorFunction: QUERY_DIRECTORY = recon
+            0,                                              //  Flags
+            FilterOperation_Pre_DirCtrl,                    //  PreOperation
             NULL,                                           //  PostOperation
         },
         { IRP_MJ_OPERATION_END }
@@ -355,6 +462,8 @@ namespace MiniFilter
         constexpr BYTE C_SET_SELF = 3;
         constexpr BYTE C_REGISTER_RING = 4;
         constexpr BYTE C_VERDICT = 5;
+        constexpr BYTE C_SET_RULES = 6;
+        constexpr ULONG MAX_RULE_BYTES = 64 * 1024; // wire ruleset blob (variable length)
 
         // Filter Manager hands this callback the *connection* cookie (set by
         // FilterConnectNotify to the client PFLT_PORT), NOT the server PortCookie.
@@ -362,9 +471,39 @@ namespace MiniFilter
         // and bugchecks in SetServicePid (0x3B AV). Reach the arm table through the
         // driver-lifetime global instead (same table used by the enforcement path).
         UNREFERENCED_PARAMETER(PortCookie_);
+        if (InputBuffer == nullptr || InputBufferLength == 0)
+            return STATUS_INVALID_PARAMETER;
+
+        // Peek the kind to route the variable-length rules blob away from the
+        // fixed 16-byte record frames (arm/verdict).
+        BYTE kind0 = 0;
+        if (SafeCopyIn(&kind0, InputBuffer, 1) != STATUS_SUCCESS)
+            return STATUS_ACCESS_VIOLATION;
+
+        if (kind0 == C_SET_RULES)
+        {
+            // { kind:u8@0, pad[3], WireLen:u32@4, wirebytes@8.. } → engine_create.
+            // The wire bytes are the DAG ruleset ("ERD1") from engine_rules.
+            if (GlobalEngine == nullptr)
+                return STATUS_DEVICE_NOT_READY;
+            if (InputBufferLength < 8)
+                return STATUS_INVALID_PARAMETER;
+            ULONG cap = InputBufferLength < (MAX_RULE_BYTES + 8) ? InputBufferLength : (MAX_RULE_BYTES + 8);
+            BYTE* rbuf = static_cast<BYTE*>(ExAllocatePool2(POOL_FLAG_NON_PAGED, cap, 'EVT0'));
+            if (rbuf == nullptr)
+                return STATUS_INSUFFICIENT_RESOURCES;
+            defer{ ExFreePool(rbuf); };
+            if (SafeCopyIn(rbuf, InputBuffer, cap) != STATUS_SUCCESS)
+                return STATUS_ACCESS_VIOLATION;
+            ULONG wire_len = *(UINT32*)(rbuf + 4);
+            if (wire_len > cap - 8)
+                wire_len = cap - 8; // clamp to what we actually copied
+            return GlobalEngine->Load(rbuf + 8, wire_len);
+        }
+
         if (GlobalArms == nullptr)
             return STATUS_SUCCESS;
-        if (InputBuffer == nullptr || InputBufferLength == 0 || InputBufferLength % REC != 0)
+        if (InputBufferLength % REC != 0)
             return STATUS_INVALID_PARAMETER;
 
         ULONG len = InputBufferLength < MAX_BYTES ? InputBufferLength : MAX_BYTES;
@@ -491,10 +630,11 @@ namespace MiniFilter
     _IRQL_requires_(PASSIVE_LEVEL)
     _IRQL_requires_same_
     Port::Port(
-        _In_ const Filter&   Filter,
-        _In_ UNICODE_STRING* PortName,
-        _In_ Arm::Table&     ArmTable,
-        _In_ Ring::Buffer&   RingBuffer
+        _In_ const Filter&     Filter,
+        _In_ UNICODE_STRING*   PortName,
+        _In_ Arm::Table&       ArmTable,
+        _In_ Ring::Buffer&     RingBuffer,
+        _In_ Engine::Instance& Engine
     ) noexcept
     {
         auto& status = failable::_status;
@@ -503,6 +643,7 @@ namespace MiniFilter
         // for disconnect. Both live in this file, so a global is the honest shape —
         // FltMgr gives the message callback the *connection* cookie, not this one.
         GlobalRing = &RingBuffer;
+        GlobalEngine = &Engine; // for C_SET_RULES pushdown
 
         // Create port cookie
         auto result = krn::make<PortCookie>(Filter._filter, &ArmTable);
@@ -557,5 +698,6 @@ namespace MiniFilter
         FltCloseCommunicationPort(_port);
         delete reinterpret_cast<PortCookie*>(_cookie);
         GlobalRing = nullptr;
+        GlobalEngine = nullptr;
     }
 }

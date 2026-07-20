@@ -26,6 +26,15 @@ pub const SERVICE_RULES: &str = concat!(
     include_str!("../rules/lsass_pattern.rules"),
 );
 
+/// Ruleset DAG (engine_core) ship xuống engine chạy trong kernel.
+pub const DAG_RULES: &str = include_str!("../rules/dag.rules");
+
+/// Compile [`DAG_RULES`] thành wire bytes (`ERD1`) để đẩy xuống driver qua
+/// control frame `C_SET_RULES`. Chạy được mọi platform (compile thuần).
+pub fn compiled_dag_rules() -> Result<Vec<u8>, String> {
+    engine_rules::compile_dag_to_bytes(DAG_RULES).map_err(|e| e.to_string())
+}
+
 /// One decoded event's outcome, ready to print. The `advanced`/`completed` flags
 /// come straight from the engine verdict so the caller can pick a log level:
 /// no match → debug, matched an automaton → info, completed a chain → warn.
@@ -183,5 +192,17 @@ fn ttp_hint(se: &sensor::SensorEvent) -> &'static str {
         ProcessCreate { .. } => "[exec] ",
         RemoteThreadCreate { .. } => "[inject] ",
         _ => "",
+    }
+}
+
+#[cfg(test)]
+mod dag_rules_tests {
+    #[test]
+    fn dag_rules_compile_to_wire() {
+        // dag.rules phải compile được (validate DAG + encode wire) — chặn regression
+        // trước khi service push xuống kernel.
+        let bytes = super::compiled_dag_rules().expect("dag.rules phải compile");
+        assert!(bytes.len() > 8, "wire ruleset rỗng bất thường");
+        assert_eq!(&bytes[..4], b"ERD1", "sai magic wire DAG");
     }
 }

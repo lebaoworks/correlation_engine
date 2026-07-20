@@ -9,6 +9,8 @@ use crate::rules::Action;
 
 /// Verdict của MỘT event — phản ứng mạnh nhất trong các bước vừa kích hoạt
 /// tại đúng event đó (`engine_base.md §5`): `ignore < inspect < block < disarm`.
+/// `repr(u32)` để giá trị (0..3) ổn định qua FFI (xem `engine_ffi`).
+#[repr(u32)]
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Verdict {
     /// Event vô hại/vô dụng: không kích hoạt bước nào của pattern nào.

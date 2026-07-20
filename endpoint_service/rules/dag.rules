@@ -1,0 +1,18 @@
+# Ruleset DAG ship xuống engine trong kernel (engine_core v0.0.2).
+# Tagger trong driver (Engine.cpp) chỉ bật cho các TTP mà ruleset này tham chiếu.
+#
+# ransomware_dag — bit 1 (do thám) ∥ bit 2 (xoá Shadow Copy) tự do thứ tự sau gốc;
+# bit 3 (mã hoá) là mốc {1,2}. (T1083/T1486 cần tín hiệu read/entropy driver chưa
+# phát — xem sensor readme; bit 0/2 khớp được từ exec image/cmdline.)
+pattern ransomware_dag
+    step bit=0 ops=exec ttps=T1059
+    step bit=1 prereq=0 ops=read ttps=T1083
+    step bit=2 prereq=0 ops=exec ttps=T1490
+    step bit=3 prereq=1,2 ops=write ttps=T1486 action=disarm(write,exec,create,inject,connect)
+end
+
+# lsass_dump — mở handle đọc bộ nhớ vào lsass rồi ghi ra file.
+pattern lsass_dump
+    step bit=0 ops=open ttps=T1003
+    step bit=1 prereq=0 ops=write action=block
+end

@@ -23,9 +23,11 @@ extern crate alloc;
 pub mod base;
 pub mod detector;
 pub mod event;
+pub mod ffi;
 pub mod rules;
 pub mod v0_0_1;
 pub mod v0_0_2;
+pub mod v0_0_2_bounded;
 pub mod wire;
 
 pub use detector::{Detector, Verdict};
@@ -33,4 +35,12 @@ pub use event::{Event, Key, Kind, Op, OpSet, Ttp};
 pub use rules::{
     Action, DagPattern, DagRuleSet, DagStep, Pattern, RuleSet, Step, StepMatch,
 };
+
+// Bản engine hiện hành. Kernel dùng biến thể fixed-capacity không-cấp-phát-hot-path
+// (`v0_0_2_bounded`) để chạy được trong mọi điều kiện (không panic OOM); usermode/test
+// dùng bản `v0_0_2` (BTreeMap/Vec). Cả hai có `Engine::try_new(DagRuleSet) -> Option<Self>`
+// và `on_event(&Event, &[Ttp]) -> Verdict` nên FFI dùng chung.
+#[cfg(feature = "kernel")]
+pub use v0_0_2_bounded::Engine;
+#[cfg(not(feature = "kernel"))]
 pub use v0_0_2::Engine;

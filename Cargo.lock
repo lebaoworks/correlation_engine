@@ -183,6 +183,7 @@ dependencies = [
  "clap",
  "edr-engine",
  "edr-proto",
+ "engine_rules",
  "env_logger",
  "log",
 ]

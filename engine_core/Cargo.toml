@@ -5,4 +5,13 @@ edition = "2021"
 
 # Lõi phát hiện theo docs/engine_base.md — no_std + alloc, zero-dep,
 # dùng được cả usermode lẫn kernel mode (kernel cấp allocator).
+#
+# FFI C-ABI (module `ffi`) luôn biên dịch. Feature `kernel` bật global-allocator
+# + panic-handler chuyển tiếp xuống driver (chỉ khi build static lib cho kernel):
+#   cargo rustc -p engine_core --release --features kernel \
+#       --target x86_64-pc-windows-msvc --crate-type staticlib -- -C panic=abort
+# Không bật `kernel` cho build/test std thường (singleton allocator/panic sẽ đụng std).
+[features]
+kernel = []
+
 [dependencies]

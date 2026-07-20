@@ -4,7 +4,8 @@
 #   endpoint_service/ console app cầu nối sensor(kernel) ↔ engine, ship wire lên backend
 #   backend_service/  console app giữ full provenance graph, hiển thị storyline khi có alert
 # Loạt engine mới (implement theo docs/engine_base.md → engine_v*):
-#   engine_core/      lõi phát hiện no_std+alloc, zero-dep (usermode + kernel mode)
+#   engine_core/      lõi phát hiện no_std+alloc, zero-dep (usermode + kernel);
+#                     module `ffi` + feature `kernel` = static lib cho driver (SnsDrv)
 #   engine_rules/     compile rule text → RuleSet/bytes cho engine_core
 #   engine_replay/    regression test: dataset docs/replay.md + rule qua engine_core
 [workspace]

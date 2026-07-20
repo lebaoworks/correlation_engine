@@ -60,6 +60,10 @@ Hai ràng buộc an toàn quan trọng nhất rơi ra từ sơ đồ:
    bịa xấp xỉ thô (process seed / deadline `seg_window`) rồi bindings thay thế ngay. Vì vậy sơ đồ
    không còn cạnh `1 → 5`: working-set nhận vòng đời automaton từ nhánh bindings (`2 → 5`).
 
+Ngoài ladder an toàn trên còn một **nhánh tối ưu latency thuần** (không đổi kết quả detection, không
+mở lỗ hổng, không ràng buộc thứ tự với 1–9): **P1 — trigger index** (ngay sau mục 1). Động lực:
+chạy inline trong kernel với ngân sách latency cực thấp.
+
 ---
 
 # 1. Pattern = partial-order DAG (chỉ thêm thứ tự bộ phận)
@@ -98,6 +102,43 @@ thế** ngay — làm rồi bỏ. Hơn nữa việc **thực thi trần** (giả
 `|working-set|`) là nội dung bước 5: refcount tăng lúc bind (bước 2), giảm lúc automaton GC — **hai
 nửa của cùng một bất biến**, phải dựng cùng nhau. ⟹ điều kiện GC automaton đi cùng cụm **2 + 3 + 5**,
 không tách riêng ra bước 1.
+
+# P1. Trigger index — định tuyến `(op, ttp)` (tối ưu latency, không đổi detection)
+
+> **Nhánh perf, không thuộc ladder an toàn.** Đây là tối ưu **thuần latency**, động lực là chạy
+> inline trong kernel (ngân sách latency cực thấp). Nó **không** đổi kết quả phát hiện (cùng tập
+> match, chỉ bớt số lần kiểm), **không** mở lỗ hổng nào, nên không nằm trong sơ đồ phụ thuộc an
+> toàn ở trên và có thể slot vào bất cứ lúc nào sau v0.0.2. (`engine.md §6.2` — `PATTERN_TRIGGER`;
+> `§5` — "định tuyến hai kiểu")
+
+Hiện `ADVANCE` (cả seed lẫn push) quét **toàn bộ pattern × step** mỗi event, kể cả event chẳng khớp
+gì — chi phí O(Σ step toàn ruleset) per-event, trội hẳn khi ruleset lớn. Thay bằng một **chỉ mục
+nghịch đảo dựng lúc load rule**: `trigger[key] → [(pid, step)]`, với `key` rút từ điều kiện `match`
+của bước (`op` và/hoặc từng `ttp`). Mỗi event chỉ tra các step mà `(op, ttps)` của nó *có thể* khớp
+— seed + push chạm `O(#step khớp trigger + #automaton bị ảnh hưởng)`, không phải cả ruleset. Event
+không khớp gì (đa số) → chi phí ≈ một lần tra bảng.
+
+**Ưu điểm**
+- Cắt thẳng chi phí per-event trội nhất khi ruleset lớn — điều kiện thực tế để đặt engine vào
+  đường kernel-inline có ngân sách latency cứng.
+- **Chỉ mục CHÍNH XÁC, không đánh đổi độ chính xác.** Key `(op, ttp)` là chính xác (`op` là enum →
+  chỉ số mảng; `ttp` remap sang chỉ số dày đặc lúc load, hoặc mảng-sắp-xếp + tra nhị phân — không
+  băm khoá vào không gian mất mát). Định tuyến giữ **nguyên vẹn** mọi match; chạy có/không trigger
+  index cho verdict giống hệt nhau (kiểm chứng được bằng test vi sai như base↔v0.0.1).
+- Bổ trợ cho `BIND_IDX` (bước 3): trigger index = định tuyến theo **loại** sự kiện (`op`/`ttp`),
+  `BIND_IDX` = định tuyến theo **identity** đã bind. Hai kiểu định tuyến độc lập, cộng hưởng.
+
+**Nhược điểm**
+- Thêm một bảng chỉ mục, dựng **một lần lúc load rule** (không trên hot path); bộ nhớ O(Σ step),
+  hằng số theo ruleset, không tăng theo thời gian chạy.
+- Chỉ mục phải dựng lại khi ruleset đổi — nhưng nạp rule vốn đã là thao tác hiếm, ngoài hot path.
+- Không giúp gì cho phần chi phí còn lại (`UNIFY_STORYLINE`, kiểm `DISARMED`) — những cái đó có
+  trần nhờ bounded working-set (5) + trần storyline (6); trigger index chỉ lo phần `ADVANCE`.
+
+> **Đã loại có chủ đích (đổi độ chính xác lấy tốc độ):** thay `BTreeMap` (LINE/DISARMED) bằng hash
+> table, hay băm khoá 128-bit xuống fingerprint ngắn — bỏ, vì rủi ro va chạm = sai định tuyến =
+> mất/nhầm detection. Trigger index không thuộc nhóm này: nó không băm khoá, chỉ lập chỉ mục theo
+> `(op, ttp)` chính xác.
 
 # 2. Ràng buộc identity giữa các bước (`bindings`)
 

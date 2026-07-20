@@ -52,6 +52,9 @@ pub const C_SET_SELF: u8 = 3;
 pub const C_REGISTER_RING: u8 = 4;
 /// Answer one `FRAME_REPLY_EXPECTED` ring record, matched by `ReqId`.
 pub const C_VERDICT: u8 = 5;
+/// Push a compiled DAG ruleset down to the in-kernel engine (variable length,
+/// not a 16-byte record — see [`encode_set_rules`]).
+pub const C_SET_RULES: u8 = 6;
 pub const CONTROL_RECORD: usize = 16;
 
 /// Stable op codes for the enforceable subset (must match the driver).
@@ -157,6 +160,19 @@ pub fn encode_register_ring(ring_bytes: u32, doorbell: u64) -> Vec<u8> {
     v.extend_from_slice(&[0u8; 3]);
     v.extend_from_slice(&ring_bytes.to_le_bytes());
     v.extend_from_slice(&doorbell.to_le_bytes());
+    v
+}
+
+/// Push a compiled DAG ruleset (engine_core wire format `ERD1`) to the in-kernel
+/// engine. Variable-length frame, distinct from the 16-byte record frames:
+/// `{ C_SET_RULES:u8@0, pad[3], WireLen:u32@4, wire bytes @8.. }`. Matches the
+/// driver's `MiniFilter::Port::ControlMessageNotify` `C_SET_RULES` branch.
+pub fn encode_set_rules(wire: &[u8]) -> Vec<u8> {
+    let mut v = Vec::with_capacity(8 + wire.len());
+    v.push(C_SET_RULES);
+    v.extend_from_slice(&[0u8; 3]);
+    v.extend_from_slice(&(wire.len() as u32).to_le_bytes());
+    v.extend_from_slice(wire);
     v
 }
 

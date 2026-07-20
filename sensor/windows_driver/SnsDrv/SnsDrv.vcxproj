@@ -88,11 +88,11 @@
     <ClCompile>
       <WppEnabled>true</WppEnabled>
       <WppScanConfigurationData>trace.h</WppScanConfigurationData>
-      <AdditionalIncludeDirectories>$(ProjectDir)Utilities;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)Utilities;$(ProjectDir)..\..\..\engine_core\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpp20</LanguageStandard>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>$(DDK_LIB_PATH)fltMgr.lib;Fwpkclnt.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>$(DDK_LIB_PATH)fltMgr.lib;Fwpkclnt.lib;$(ProjectDir)..\..\..\target\x86_64-pc-windows-msvc\release\engine_core.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <AdditionalOptions>/INTEGRITYCHECK %(AdditionalOptions)</AdditionalOptions>
     </Link>
   </ItemDefinitionGroup>
@@ -103,11 +103,11 @@
     <ClCompile>
       <WppEnabled>true</WppEnabled>
       <WppScanConfigurationData>trace.h</WppScanConfigurationData>
-      <AdditionalIncludeDirectories>$(ProjectDir)Utilities;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)Utilities;$(ProjectDir)..\..\..\engine_core\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpp20</LanguageStandard>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>$(DDK_LIB_PATH)fltMgr.lib;Fwpkclnt.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>$(DDK_LIB_PATH)fltMgr.lib;Fwpkclnt.lib;$(ProjectDir)..\..\..\target\x86_64-pc-windows-msvc\release\engine_core.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <AdditionalOptions>/INTEGRITYCHECK %(AdditionalOptions)</AdditionalOptions>
     </Link>
   </ItemDefinitionGroup>
@@ -124,6 +124,8 @@
     <ClCompile Include="WPF.cpp" />
     <ClCompile Include="Callbacks.cpp" />
     <ClCompile Include="Ring.cpp" />
+    <ClCompile Include="Engine.cpp" />
+    <ClCompile Include="EngineRt.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="ArmTable.hpp" />
@@ -136,6 +138,7 @@
     <ClInclude Include="Utilities\queue.hpp" />
     <ClInclude Include="Utilities\std.hpp" />
     <ClInclude Include="Ring.hpp" />
+    <ClInclude Include="Engine.hpp" />
   </ItemGroup>
   <ItemGroup>
     <None Include="ProcessMonitor.md" />

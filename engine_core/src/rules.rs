@@ -7,6 +7,7 @@
 //! Cả hai chia sẻ [`StepMatch`] (điều kiện khớp) và [`Action`] (hành vi cưỡng
 //! chế). Mỗi bước tự mang `action` riêng — không có severity/threshold gộp.
 
+use alloc::collections::BTreeSet;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -93,4 +94,22 @@ pub struct DagPattern {
 #[derive(Clone, Debug, Default)]
 pub struct DagRuleSet {
     pub patterns: Vec<DagPattern>,
+}
+
+impl DagRuleSet {
+    /// Tập TTP (đã sắp xếp, không trùng) mà **bất kỳ** bước nào của ruleset tham
+    /// chiếu. Driver dùng để chỉ bật những tagger có TTP mà rule thật sự cần —
+    /// tagging tự đồng bộ với rule, không tag TTP thừa (`docs/todo.md` P1 tinh
+    /// thần "chỉ làm việc liên quan").
+    pub fn referenced_ttps(&self) -> Vec<Ttp> {
+        let mut set = BTreeSet::new();
+        for p in &self.patterns {
+            for s in &p.steps {
+                for t in &s.matcher.ttps {
+                    set.insert(*t);
+                }
+            }
+        }
+        set.into_iter().collect()
+    }
 }

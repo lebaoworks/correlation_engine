@@ -188,26 +188,24 @@ namespace Process
             if (CreateInfo->CommandLine)
                 event.CommandLine = *CreateInfo->CommandLine;
 
-            // Multi-step chokepoint (e.g. dropper write→exec): the engine may
-            // have armed the PARENT identity for exec. If so, enforce this spawn
-            // synchronously and deny by failing the creation.
+            // Feed EVERY spawn to the in-kernel engine (via GlobalEnforce =
+            // EngineEnforceThunk): the engine advances its automata on every event,
+            // not only armed ones (it has no arm table to gate on — it decides
+            // inline). Deny the spawn if the engine's verdict is BLOCK/DISARM.
+            // Also ship async telemetry for forensic/backend (no-op if no ring).
             UINT32 parent = HandleToUlong(CreateInfo->ParentProcessId);
-            INT64  parent_start_ms = event.ProcessCreateTime.QuadPart / 10000;
             bool exempt = (GlobalArms != nullptr) && GlobalArms->IsServicePid(parent);
-            if (!exempt && GlobalArms != nullptr && GlobalEnforce != nullptr &&
-                GlobalArms->IsArmed(parent, parent_start_ms, Arm::OP_EXEC))
+            if (GlobalEventCallback != nullptr)
+                GlobalEventCallback(event); // forensic telemetry
+            if (!exempt && GlobalEnforce != nullptr)
             {
                 bool deny = false;
-                GlobalEnforce(event, &deny); // publishes to the ring and waits for the verdict
+                GlobalEnforce(event, &deny); // feed engine inline, take its verdict
                 if (deny)
                 {
                     CreateInfo->CreationStatus = STATUS_ACCESS_DENIED;
-                    TraceEvents(TRACE_LEVEL_WARNING, TRACE_DRIVER, "Process: DENIED spawn by armed parent pid=%lu", parent);
+                    TraceEvents(TRACE_LEVEL_WARNING, TRACE_DRIVER, "Process: DENIED spawn pid=%lu (engine)", parent);
                 }
-            }
-            else if (GlobalEventCallback != nullptr)
-            {
-                GlobalEventCallback(event); // async telemetry
             }
         }
         // Process termination — NOP (log verbose, emit nothing).

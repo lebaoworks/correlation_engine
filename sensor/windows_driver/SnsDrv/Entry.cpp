@@ -14,6 +14,7 @@
 #include "Callbacks.hpp"
 #include "WPF.hpp"
 #include "ArmTable.hpp"
+#include "Engine.hpp"
 
 /*********************
 *    Declarations    *
@@ -41,6 +42,7 @@ struct Driver;
 static Driver* GlobalDriver = nullptr;
 static Ring::Buffer* GlobalRingBuffer = nullptr;
 static Arm::Table* GlobalArmTable = nullptr;
+static Engine::Instance* GlobalEngine = nullptr;
 #pragma data_seg()
 
 // Telemetry sink handed to the monitors: serialize straight into the shared ring.
@@ -53,16 +55,18 @@ static NTSTATUS TelemetryThunk(const Event::Event& evt)
     return GlobalRingBuffer->PublishTelemetry(evt);
 }
 
-// Enforcement facade: publish reply-expected and block for the service's verdict.
-// Fails open if there is no ring (no service) — see Ring::EnforceSync.
-static NTSTATUS EnforceThunk(const Event::Event& evt, bool* deny)
+// In-kernel enforcement: feed the event to engine_core inline and take its verdict
+// directly — no round-trip to the service. Fails open if the engine is gone.
+// engine_core keeps DISARMED internally, so a later event carrying a disarmed op
+// returns BLOCK on its own; the driver needs no arm-table mirroring for that.
+static NTSTATUS EngineEnforceThunk(const Event::Event& evt, bool* deny)
 {
-    if (GlobalRingBuffer == nullptr)
+    if (GlobalEngine == nullptr)
     {
         *deny = false;
         return STATUS_PORT_DISCONNECTED;
     }
-    return GlobalRingBuffer->EnforceSync(evt, deny);
+    return GlobalEngine->Feed(evt, deny);
 }
 
 /*********************
@@ -78,6 +82,7 @@ private:
     Process::Monitor*   _monitor = nullptr;
     WPF::Monitor*       _netmon = nullptr;
     Arm::Table*         _armtable = nullptr;
+    Engine::Instance*   _engine = nullptr;
 
 public:
     Driver(DRIVER_OBJECT* DriverObject) noexcept
@@ -98,6 +103,22 @@ public:
         defer{ if (status != STATUS_SUCCESS) { delete _armtable; _armtable = nullptr; } };
         GlobalArmTable = _armtable;
 
+        // Initialize the in-kernel detection engine (engine_core). Created empty;
+        // endpoint_service pushes a compiled ruleset down later (Engine::Load).
+        // Must exist before Filter/Monitor register callbacks that feed it.
+        {
+            auto result = krn::make<Engine::Instance>();
+            status = result.status();
+            if (status != STATUS_SUCCESS)
+            {
+                TraceEvents(TRACE_LEVEL_ERROR, TRACE_DRIVER, "Initialized Engine -> status: %!STATUS!", status);
+                return;
+            }
+            _engine = result.release();
+        }
+        defer{ if (status != STATUS_SUCCESS) { delete _engine; _engine = nullptr; } };
+        GlobalEngine = _engine;
+
         // Initialize the shared telemetry ring. It holds no memory until the service
         // connects and asks for it (C_REGISTER_RING); until then every publish is a
         // cheap no-op and enforcement fails open.
@@ -116,7 +137,7 @@ public:
 
         // Initialize MiniFilter
         {
-            auto result = krn::make<MiniFilter::Filter>(DriverObject, TelemetryThunk, *_armtable, EnforceThunk);
+            auto result = krn::make<MiniFilter::Filter>(DriverObject, TelemetryThunk, *_armtable, EngineEnforceThunk);
             status = result.status();
             if (status != STATUS_SUCCESS)
             {
@@ -131,7 +152,7 @@ public:
         // registration, verdicts). Telemetry never goes through it.
         {
    	        UNICODE_STRING port_name = RTL_CONSTANT_STRING(L"\\SnsDrvPort");
-   	        auto result = krn::make<MiniFilter::Port>(*_filter, &port_name, *_armtable, *_ring);
+   	        auto result = krn::make<MiniFilter::Port>(*_filter, &port_name, *_armtable, *_ring, *_engine);
    	        status = result.status();
             if (status != STATUS_SUCCESS)
             {
@@ -144,7 +165,7 @@ public:
 
         // Initialize Process Monitor
         {
-            auto result = krn::make<Process::Monitor>(TelemetryThunk, *_armtable, EnforceThunk);
+            auto result = krn::make<Process::Monitor>(TelemetryThunk, *_armtable, EngineEnforceThunk);
             status = result.status();
             if (status != STATUS_SUCCESS)
             {
@@ -185,6 +206,9 @@ public:
         delete _monitor; // Stop process callbacks (they consult the arm table / enforce)
         delete _netmon; // Stop monitoring network events
         delete _filter; // Close the filter => stop accepting new events
+        // Callbacks that fed the engine are stopped above; safe to drop it now.
+        GlobalEngine = nullptr; // EngineEnforceThunk tests this; never leave it dangling
+        delete _engine;
         // Only now can the ring go: its destructor unregisters, which waits out any
         // producer still mid-publish. Every source of publishes is stopped above.
         GlobalRingBuffer = nullptr; // the thunks test this; never leave it dangling

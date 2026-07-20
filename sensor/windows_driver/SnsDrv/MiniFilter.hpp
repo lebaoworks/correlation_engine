@@ -10,6 +10,7 @@
 #include "Event.hpp"
 #include "ArmTable.hpp"
 #include "Ring.hpp"
+#include "Engine.hpp"
 
 /*********************
 *    Declarations    *
@@ -79,10 +80,11 @@ namespace MiniFilter
         _IRQL_requires_(PASSIVE_LEVEL)
         _IRQL_requires_same_
         Port(
-            _In_ const Filter&   Filter,
-            _In_ UNICODE_STRING* PortName,
-            _In_ Arm::Table&     ArmTable,
-            _In_ Ring::Buffer&   RingBuffer
+            _In_ const Filter&     Filter,
+            _In_ UNICODE_STRING*   PortName,
+            _In_ Arm::Table&       ArmTable,
+            _In_ Ring::Buffer&     RingBuffer,
+            _In_ Engine::Instance& Engine
         ) noexcept;
 
         _IRQL_requires_(PASSIVE_LEVEL)

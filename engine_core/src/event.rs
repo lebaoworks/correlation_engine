@@ -57,7 +57,9 @@ impl OpSet {
 }
 
 /// Technique (TTP) đã được tagger gán cho event — ví dụ `Ttp(1059)` cho T1059.
-/// Engine chỉ so khớp id, không mang ngữ nghĩa MITRE.
+/// Engine chỉ so khớp id, không mang ngữ nghĩa MITRE. `repr(transparent)` để
+/// FFI cast thẳng `&[u32]` → `&[Ttp]` không copy (xem `engine_ffi`).
+#[repr(transparent)]
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct Ttp(pub u32);
 

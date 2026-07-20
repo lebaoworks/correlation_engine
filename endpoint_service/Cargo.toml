@@ -11,6 +11,8 @@ description = "EDR userland service: bridges the kernel sensor to the detection 
 clap = { version = "4.6.1", features = ["derive"] }
 edr-engine = { path = "../engine" }
 edr-proto = { path = "../proto" }
+# Compile DAG rule text → wire bytes ship xuống engine_core trong kernel.
+engine_rules = { path = "../engine_rules" }
 env_logger = "0.11.11"
 log = "0.4.33"
 

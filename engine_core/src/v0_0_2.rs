@@ -50,6 +50,12 @@ impl Engine {
         }
     }
 
+    /// Constructor fallible dùng chung với biến thể kernel (không bao giờ thất bại
+    /// ở bản này — dùng để FFI gọi thống nhất qua alias `crate::Engine`).
+    pub fn try_new(rules: DagRuleSet) -> Option<Self> {
+        Some(Self::new(rules))
+    }
+
     /// `ON_EVENT` (`engine_v0.0.2.md §4`) — không đổi so với v0.0.1.
     pub fn on_event(&mut self, e: &Event, ttps: &[Ttp]) -> Verdict {
         if let Some(ops) = self.disarmed.get(&e.actor) {
@@ -67,6 +73,11 @@ impl Engine {
     pub fn storyline_of(&self, key: Key) -> Option<impl Iterator<Item = Key> + '_> {
         let line = *self.line.get(&key)?;
         Some(self.storylines[line].as_ref().unwrap().members.iter().copied())
+    }
+
+    /// Tập TTP mà ruleset đang nạp tham chiếu — driver dùng để chọn tagger cần bật.
+    pub fn referenced_ttps(&self) -> Vec<Ttp> {
+        self.rules.referenced_ttps()
     }
 
     // ---- UNIFY_STORYLINE (không đổi so với v0.0.1) ----

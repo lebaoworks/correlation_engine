@@ -101,7 +101,16 @@ impl WinPortSource {
         if let Err(e) = src.push_control(&self_frame) {
             return Err(io::Error::new(io::ErrorKind::Other, format!("register self pid: {}", e)));
         }
-        debug!("[winport] self pid registered; ready");
+        // Compile the DAG ruleset and push it to the in-kernel engine (engine_core).
+        // Without this the kernel engine has no rules and every verdict is IGNORE.
+        debug!("[winport] self pid registered; pushing rules ...");
+        let wire = crate::compiled_dag_rules()
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("compile rules: {}", e)))?;
+        let rules_frame = crate::control::encode_set_rules(&wire);
+        if let Err(e) = src.push_control(&rules_frame) {
+            return Err(io::Error::new(io::ErrorKind::Other, format!("push rules ({} B): {}", wire.len(), e)));
+        }
+        debug!("[winport] rules pushed ({} B); ready", wire.len());
         Ok(src)
     }
 }
