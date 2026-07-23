@@ -30,16 +30,26 @@ cạnh **nhân-quả** (`IS_CAUSAL`) thì `object` trở thành *sản phẩm/th
 (docs/engine.md §4). Phân loại này là nền của `scope=same_storyline` và của việc phân biệt
 "ghi X rồi chạy X" với "A đọc file người khác ghi".
 
-| Op | bit | Ngữ nghĩa (actor → object) | Ghép storyline? | Vì sao |
-|---|---|---|---|---|
-| `Exec`    | `1<<0` | chạy/ánh xạ image thành process | ✅ merge | sản sinh — object là sản phẩm actor tạo ra |
-| `Create`  | `1<<1` | tạo object (file/process/khoá) | ✅ merge | sản sinh — object do actor đẻ ra |
-| `Write`   | `1<<2` | ghi nội dung vào object | ✅ merge | sản phẩm — nội dung object do actor định đoạt |
-| `Inject`  | `1<<6` | tiêm code/thread vào object | ✅ merge | điều khiển — actor chiếm quyền thực thi object |
-| `Dup`     | `1<<7` | nhân bản/chuyển handle sang object | ✅ merge | chuyển quyền — object thừa hưởng năng lực actor |
-| `Read`    | `1<<3` | đọc nội dung object | ❌ ship cạnh | tiêu thụ, không sở hữu — đọc file người khác ghi ≠ cùng lineage |
-| `Open`    | `1<<4` | mở handle tới object | ❌ ship cạnh | chỉ truy cập — mở handle LSASS không biến actor thành con LSASS |
-| `Connect` | `1<<5` | kết nối tới socket/đầu xa | ❌ ship cạnh | truy cập ngoài — không sản sinh thực thể mới trong storyline |
+| Op | bit | Actor | Object | Ngữ nghĩa (actor → object) | Ghép storyline? | Vì sao |
+|---|---|---|---|---|---|---|
+| `Exec`    | `1<<0` | Process | File (ảnh thực thi) | chạy/ánh xạ image thành process | ✅ merge | sản sinh — object là sản phẩm actor tạo ra |
+| `Create`  | `1<<1` | Process | File \| Process \| Registry* | tạo object (file/process/khoá) | ✅ merge | sản sinh — object do actor đẻ ra |
+| `Write`   | `1<<2` | Process | File \| Registry* | ghi nội dung vào object | ✅ merge | sản phẩm — nội dung object do actor định đoạt |
+| `Inject`  | `1<<6` | Process | Process | tiêm code/thread vào object | ✅ merge | điều khiển — actor chiếm quyền thực thi object |
+| `Dup`     | `1<<7` | Process | Process | nhân bản/chuyển handle sang object | ✅ merge | chuyển quyền — object thừa hưởng năng lực actor |
+| `Read`    | `1<<3` | Process | File \| Process | đọc nội dung object | ❌ ship cạnh | tiêu thụ, không sở hữu — đọc file người khác ghi ≠ cùng lineage |
+| `Open`    | `1<<4` | Process | Process \| File \| Registry* | mở handle tới object | ❌ ship cạnh | chỉ truy cập — mở handle LSASS không biến actor thành con LSASS |
+| `Connect` | `1<<5` | Process | Socket | kết nối tới socket/đầu xa | ❌ ship cạnh | truy cập ngoài — không sản sinh thực thể mới trong storyline |
+
+`Actor` luôn là **Process** — chỉ tiến trình mới hành động trong mô hình event này; cột object mới
+là trục biến thiên thật sự.
+
+> **\*Registry chưa có chỗ đứng trong `Kind`.** [`Kind`](engine_core/src/event.rs#L10) hiện chỉ có
+> `Process | File | Socket | Other` — không có biến thể Registry, dù chính bảng trên gọi tên nó
+> ("khoá" ở dòng `Create`). Một `Create/Write/Open` nhắm vào registry key hiện phải rơi vào
+> `Kind::Other`, mất khả năng lọc theo `obj=…` trong rule (mục [Rules](#rules)). Cần quyết định:
+> thêm biến thể `Kind::Registry` (nếu registry là bề mặt cần rule lọc riêng) hay giữ `Other` (nếu
+> registry chỉ cần phân biệt qua `ttp`, không qua `obj`).
 
 > **Hệ quả cho rule:** ở pattern mà mọi bước đều là op **merge** trên **cùng** entity đã `bind`
 > (vd `write X → exec X`), `same_storyline` gần như tự thoả — binding đã ép đúng file, mà chạm-file
