@@ -1,7 +1,0 @@
-# THE USER'S FALSE-POSITIVE QUESTION: "write file X, run file Y (not X)".
-# A process drops an executable X, then launches an UNRELATED image Y.
-# Because binding is by file IDENTITY (FileId), the exec's image (Y) != bound
-# dropped file (X) -> BINDING_OK fails -> the dropper pattern does NOT accept.
-# Expected: NO dropper detection, NO DENY. (engine.md §5.8 rule 1)
-ts=1000 op=write actor=500.1 object=file:F_x dir="C:\Temp" entropy=0.40 pe=1
-ts=1200 op=exec  actor=500.1 object=proc:600.2 image=F_y cmd="--run"

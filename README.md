@@ -21,6 +21,253 @@ event (exec/write/open/read) ─────────────────
 Engine **chạy trong kernel**: driver bắt event → tag TTP (theo op) → gọi `engine_core` → verdict →
 chặn tại chỗ. `endpoint_service` co lại thành bộ **compile rule + ship xuống** driver.
 
+## Behavior
+
+Engine nhận event thô `(actor, op, object)` — `op` là một trong 8 [`Op`](engine_core/src/event.rs#L20).
+Ngoài việc khớp bước rule (`Step.match.ops`), mỗi op còn quyết định **có ghép storyline hay không**:
+cạnh **nhân-quả** (`IS_CAUSAL`) thì `object` trở thành *sản phẩm/thuộc quyền* của storyline `actor` →
+**merge** hai storyline; cạnh **truy cập** thì chỉ **ship cạnh**, giữ nguyên hai storyline riêng
+(docs/engine.md §4). Phân loại này là nền của `scope=same_storyline` và của việc phân biệt
+"ghi X rồi chạy X" với "A đọc file người khác ghi".
+
+| Op | bit | Ngữ nghĩa (actor → object) | Ghép storyline? | Vì sao |
+|---|---|---|---|---|
+| `Exec`    | `1<<0` | chạy/ánh xạ image thành process | ✅ merge | sản sinh — object là sản phẩm actor tạo ra |
+| `Create`  | `1<<1` | tạo object (file/process/khoá) | ✅ merge | sản sinh — object do actor đẻ ra |
+| `Write`   | `1<<2` | ghi nội dung vào object | ✅ merge | sản phẩm — nội dung object do actor định đoạt |
+| `Inject`  | `1<<6` | tiêm code/thread vào object | ✅ merge | điều khiển — actor chiếm quyền thực thi object |
+| `Dup`     | `1<<7` | nhân bản/chuyển handle sang object | ✅ merge | chuyển quyền — object thừa hưởng năng lực actor |
+| `Read`    | `1<<3` | đọc nội dung object | ❌ ship cạnh | tiêu thụ, không sở hữu — đọc file người khác ghi ≠ cùng lineage |
+| `Open`    | `1<<4` | mở handle tới object | ❌ ship cạnh | chỉ truy cập — mở handle LSASS không biến actor thành con LSASS |
+| `Connect` | `1<<5` | kết nối tới socket/đầu xa | ❌ ship cạnh | truy cập ngoài — không sản sinh thực thể mới trong storyline |
+
+> **Hệ quả cho rule:** ở pattern mà mọi bước đều là op **merge** trên **cùng** entity đã `bind`
+> (vd `write X → exec X`), `same_storyline` gần như tự thoả — binding đã ép đúng file, mà chạm-file
+> bằng op merge thì kéo theo cùng storyline. `scope` chỉ thành ràng buộc *thực sự* khi có bước dùng
+> op **ship cạnh** (`Open`/`Read`/`Connect` — LSASS dump, C2, đọc file lạ) hoặc khi cần chặn việc
+> khâu nhầm các lineage độc lập.
+
+## Rules
+
+Một **rule** mô tả một mẫu tấn công là **thứ tự bộ phận (DAG) các bước**, không phải chuỗi tuyến
+tính. Engine theo tiến độ bằng **bitmask các bước đã xong** (`completed_mask`), nên các bước tự do
+thứ tự đến xen kẽ vẫn khớp (docs/engine.md §6).
+
+### Tagger — ranh giới giữa event thô và rule
+
+[`Event`](engine_core/src/event.rs#L68) chỉ mang **6 trường**: `ts, op, actor, actor_kind, object,
+object_kind` — không path, không chữ ký, không entropy, không cmdline. Mọi thứ "ngữ nghĩa" khác
+(technique, công cụ, độ tin cậy nguồn gốc…) được lớp **tagger** (platform-specific, docs/engine.md
+§6.0) diễn giải **trước khi** event chạm tới DAG matcher, rồi gói lại thành tập `ttps` đi kèm event.
+
+Hệ quả cho rule: chỉ có **hai kênh** để mô tả một event —
+- **cấu trúc** (đọc thẳng từ `Event`): `op`, `obj` (từ `Kind`).
+- **ngữ nghĩa** (do tagger gán): `ttp`.
+
+Không có kênh thứ ba. Muốn khớp theo "đã ký bởi nhà phát hành tin cậy", "entropy cao", "hash nằm
+trong threat-intel" — **không thể** viết thẳng biểu thức đó vào rule (không có trường nào để đọc);
+phải để tagger tự kiểm tra rồi phát ra một `Ttp` đại diện (vd `T_SIGNED_TRUSTED`), rule chỉ khớp
+TTP đó như mọi TTP khác. Ràng buộc này áp dụng cho **mọi** clause dùng thuộc tính, kể cả `unless`
+bên dưới.
+
+### Grammar
+
+```
+ruleset := pattern+
+pattern := "pattern" NAME
+             [ "scope" SCOPE ]                       # mặc định same_storyline
+             step+
+           "end"
+step    := "step" NAME "=" match [ "after" prereq ] [ "unless" names ] [ "->" action ]
+match   := clause ( "&" clause )*
+clause  := op | "ttp" ttpsel | "obj" kind | bind
+op      := exec | create | write | read | open | connect | inject | dup | any
+ttpsel  := T<id> | any( T<id>, … ) | all( T<id>, … )
+kind    := process | file | socket
+bind    := field "=" NAME ":" field                  # <field-này> phải == <step>:<field-kia>
+field   := actor | object
+prereq  := NAME ( "&" NAME )*                         # AND: mọi step phải xong (mốc hội tụ)
+         | NAME ( "|" NAME )*                         # OR : một step bất kỳ xong (hợp lưu)
+                                                      # thuần & HOẶC thuần | — KHÔNG trộn
+names   := NAME ( "," NAME )*
+action  := block | disarm oplist                     # bỏ trống = chỉ inspect (báo hiệu)
+SCOPE   := same_storyline | same_actor | free
+```
+
+### Một `step` gồm 6 trục độc lập
+
+`step <name> = <op> [& ttp …] [& obj …] [& <bind>] … [after …] [unless …] [-> <action>]`
+
+| Trục | Từ khoá | Ý nghĩa | Bắt buộc? |
+|---|---|---|---|
+| **op** | `exec/write/open/…/any` | loại syscall — luôn viết trước; là **đơn vị chặn** | có (dùng `any` nếu không quan tâm) |
+| **ttp** | `ttp T1003` / `ttp any(…)` / `ttp all(…)` | nhãn ngữ nghĩa tagger gán; `any`=OR biến thể, `all`=phải đủ | không |
+| **obj** | `obj process/file/socket` | loại object của event | không |
+| **bind** | `object=drop:object` | identity: trường này phải **trùng thực thể** với `<step>:<field>` | không |
+| **after** | `after recon & kill_shadow` / `after a \| b` | các step phải **xong trước**; `&`=mọi, `\|`=bất kỳ | không (rỗng = bước gốc/seed) |
+| **unless** | `unless trusted_msi` | bỏ qua bước này nếu step liệt kê **đã** commit (whitelist) | không |
+| **action** | `-> block` / `-> disarm write,exec` | cưỡng chế khi bước commit; bỏ trống = inspect | không |
+
+### Hai loại "và" — đừng lẫn
+
+| | Nghĩa | Phạm vi |
+|---|---|---|
+| `&` (trong `match`) | các điều kiện **cùng đúng** | **một** event |
+| `after` (prereq) | bước kia **đã xong trước** | **qua nhiều** event (cạnh DAG) |
+
+`write & ttp T1486` = *một* event vừa là `write` vừa mang tag T1486. `encrypt after recon` = *hai*
+event khác nhau, cái sau đến sau. Không có `OR` ở tầng clause — muốn "một trong nhiều" thì dùng
+`ttp any(…)` bên trong trục ttp.
+
+### `after` nhiều bước — `&` (mọi) và `|` (bất kỳ)
+
+`after` gộp nhiều tiền đề bằng **một** toán tử, **thuần `&` hoặc thuần `|`, không trộn**:
+
+| | Nghĩa | Kiểm (O(1)) | Commit khi |
+|---|---|---|---|
+| `after a & b` | **hội tụ** — chờ mọi nhánh | `(prereq_mask & done) == prereq_mask` | cả `a` lẫn `b` xong |
+| `after a \| b` | **hợp lưu** — đạt qua đường bất kỳ | `(prereq_mask & done) != 0` | `a` *hoặc* `b` xong (cái nào trước) |
+
+Cùng một `prereq_mask` (= OR bit các cha); step chỉ thêm **một bit mode** chọn `==` hay `!=0`. Thứ
+tự *giữa* các nhánh luôn **tự do** — đó là điểm của DAG; prereq chỉ hỏi "đủ chưa", không hỏi "chiều nào".
+
+**`&` — mốc hội tụ** (ví dụ `ransomware_dag`):
+```
+pattern ransomware_dag
+    scope same_storyline
+    step exec_cmd    = exec  & ttp T1059                              # bước gốc (seed)
+    step recon       = read  & ttp T1083   after exec_cmd             # nhánh do thám
+    step kill_shadow = exec  & ttp T1490   after exec_cmd             # nhánh xoá Shadow Copy
+    step encrypt     = write & ttp T1486   after recon & kill_shadow  # MỐC: đòi CẢ hai nhánh
+                       -> disarm write,exec,create,inject,connect
+end
+```
+```
+            exec_cmd                     # gốc: prereq rỗng → seed automaton
+           /        \
+        recon    kill_shadow             # hai nhánh song song, thứ tự tự do
+           \        /
+           encrypt                        # after recon & kill_shadow → chỉ commit khi CẢ hai xong
+```
+
+| Luồng event | `encrypt` khớp? |
+|---|---|
+| exec_cmd → recon → kill_shadow → encrypt | ✅ |
+| exec_cmd → kill_shadow → recon → encrypt | ✅ (thứ tự nhánh tự do) |
+| exec_cmd → recon → encrypt | ❌ thiếu `kill_shadow` |
+
+**`|` — hợp lưu** (một step gộp nhiều đường thay cho việc nhân đôi step cùng bit):
+```
+    step stage_http = connect & ttp T1071        # hai đường staging thay thế nhau
+    step stage_dns  = connect & ttp T1048
+    step exfil      = write   & ttp T1041   after stage_http | stage_dns   # đạt qua BẤT KỲ đường nào
+```
+
+**Cấm trộn `& |` trong một `after`** — để mỗi step còn đúng một phép mask (giữ bounded, hợp kernel).
+Cần logic trộn (`d after a & (b | c)`) thì tách bằng một step trung gian gộp `|` trước:
+```
+    step reached = … after b | c
+    step d       = … after a & reached      # còn lại thuần &
+```
+
+Thứ tự đến của các nhánh chỉ cộng/trừ `order_bonus` khi chấm điểm (§6.3), **không** phải điều kiện accept.
+
+
+### Identity binding
+
+Event chỉ có hai slot thực thể: `actor` và `object`. Bind = "trường của step này phải là **cùng
+thực thể** với trường đã chốt ở một step khác", viết `<field>=<step>:<field>`. Step được trỏ là
+**nguồn** (chốt giá trị khi commit), step chứa clause là **bên khớp** (`BINDING_OK`, §6.2). Tham
+chiếu `S:field` **tự kéo theo** prereq `after S` (không join được step chưa xong).
+
+```
+# dropper — "ghi X rồi chạy ĐÚNG X", phân biệt với "ghi X chạy Y"
+pattern dropper
+    scope same_storyline
+    step drop = write & ttp T1105
+    step run  = exec  & ttp T1059 & object=drop:object   -> block   # object trùng drop → mới khớp
+end
+```
+
+`ghi X chạy Y` ⟹ `run.object = Y ≠ drop:object = X` ⟹ bước `run` không commit ⟹ không match. Rename
+vô hiệu vì khoá theo FileId (§7). Bind chéo trường cũng hợp lệ: `actor=run:object` ("kẻ hành động
+này chính là image mà `run` vừa chạy ra").
+
+### `unless` — loại trừ (whitelist)
+
+`unless S` (hoặc `unless S1, S2` — **OR**: loại trừ nếu **bất kỳ** cái nào đã commit) = bước này bị
+**bỏ qua an toàn** nếu step được liệt kê đã commit trên automaton này. Kiểm chỉ là một bit đã có sẵn
+trong `completed_mask` — **không cần giữ lại event nào**: một step, khi commit, đã collapse toàn bộ
+event (op/ttp/obj/bind) thành đúng một bit; bit đó là tất cả những gì automaton còn nhớ (docs/engine.md
+§0, §2 — "phát hiện inline không đọc cạnh lịch sử").
+
+Vì vậy `unless` **chỉ được trỏ vào tên step khác, không bao giờ trỏ vào biểu thức thuộc tính thô** —
+đúng ranh giới ở mục [Tagger](#tagger--ranh-giới-giữa-event-thô-và-rule) phía trên. Muốn whitelist
+theo "file có chữ ký hợp lệ", biến điều kiện đó thành **một step khớp TTP mà tagger đã pre-compute**,
+không phải một biểu thức attr:
+
+```
+# dropper — trừ khi đúng file đó có nguồn gốc tin cậy (tagger đã xác minh chữ ký)
+pattern dropper
+    scope same_storyline
+    step drop        = write & ttp T1105
+    step trusted_msi = write & ttp T_SIGNED_TRUSTED & object=drop:object   # tagger đã tag "đã ký"
+    step run         = exec  & ttp T1059 & object=drop:object
+                       after drop   unless trusted_msi   -> block
+end
+```
+
+`trusted_msi` bắt buộc `object=drop:object` — chỉ hợp lệ khi là **đúng file** đang bị theo dõi, không
+phải write nào khác được ký trong cùng storyline.
+
+**Lưu ý — cùng một event có thể vừa mở khoá vừa thoả whitelist.** Vì `object=drop:object` khiến
+`trusted_msi` tự có `after drop`, và `done_mask` cập nhật *live* theo thứ tự khai báo trong cùng một
+event ([v0_0_2.rs:149-151](engine_core/src/v0_0_2.rs#L149-L151)): nếu chính event `write` đó được
+tagger gắn **cả** `T1105` **lẫn** `T_SIGNED_TRUSTED` (chữ ký là thuộc tính tĩnh, đọc được ngay lúc
+ghi), `drop` commit trước → mở khoá `trusted_msi` → `trusted_msi` **cũng** commit ngay trong event
+đó. Điều này chỉ đúng nếu **`drop` được khai báo trước `trusted_msi`** trong text — quy ước: step bị
+tham chiếu luôn khai báo trước step tham chiếu nó.
+
+**Không hồi tố.** `unless S` chỉ ngăn được nếu `S` đã commit **trước hoặc cùng lúc** với thời điểm
+step bị canh được xét — whitelist đến muộn hơn không "gỡ" được hành động đã xảy ra (hệ quả tự nhiên
+của §6.3/§7 mục 3, không phải luật riêng của `unless`). Đặt step whitelist càng sớm càng an toàn.
+
+### `scope`
+
+`scope` giới hạn event nào được coi là cùng chuỗi với automaton: `same_storyline` (mặc định — cùng
+lineage nhân-quả, xem [Behavior](#behavior)), `same_actor` (đúng một process), `free` (mọi event).
+Với pattern mà mọi bước đều là op **merge** trên cùng entity đã bind, `same_storyline` gần như tự
+thoả; `scope` chỉ thành ràng buộc thật khi có bước dùng op **ship-cạnh** (`open/read/connect`).
+
+### Nhiều `action` trong một pattern
+
+Mỗi step mang action **độc lập**, bắn khi *chính step đó* commit — cho phép **leo thang**: `disarm`
+giữa chuỗi để tước năng lực, `block` tại điểm nghẽn. Nếu nhiều step commit trong cùng một event, mọi
+side-effect (`disarm`) đều thi hành, verdict trả về là `max` (`Ignore < Inspect < Block < Disarm`).
+
+```
+pattern lsass_dump
+    scope same_actor
+    step open = open  & ttp T1003 & obj process   -> disarm dup,inject
+    step dump = write   after open                 -> block
+end
+```
+
+### Compile → khớp nhanh
+
+- **label → bit**: tác giả đặt *tên* step; compiler cấp `bit` (slot trong `completed_mask`, ≤64) và
+  dựng `prereq_mask` từ `after` + tham chiếu bind. Chèn/xoá step không lệch số.
+- **ttp → mask**: mọi TTP được intern về chỉ số dày → mỗi step giữ một `u64` mask; khớp ttp =
+  `(ev_ttp & req_ttp) == req_ttp`, thay vòng lặp `Vec<Ttp>`.
+- **bind → slot**: mỗi `(step,field)` được trỏ tới nhận một slot; automaton giữ mảng `Key` cố định,
+  khớp = so `u128`. Không alloc — hợp `no_std`/kernel.
+- match(event) rút về vài phép AND/so-sánh trên machine word; bucket step theo op cho prefilter O(1).
+
+> **Trạng thái:** parser hiện hành ([engine_rules](engine_rules/src/lib.rs)) mới nhận
+> `op`/`ttp`/`prereq`/`action` (xem [dag.rules](endpoint_service/rules/dag.rules)). Các trục `obj`,
+> `bind`, `unless`, `scope` và cú pháp label ở trên là **đích đang triển khai** — bindings là bước 2
+> trong [docs/todo.md](docs/todo.md).
+
 ## Cấu trúc workspace
 
 | Crate / thư mục | Vai trò |

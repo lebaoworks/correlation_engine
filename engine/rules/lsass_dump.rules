@@ -1,9 +1,0 @@
-# Mẫu MỚI thêm hoàn toàn bằng data — không sửa/không build lại engine.
-# Credential dumping: đọc bộ nhớ LSASS (T1003.001). Đây là single-event đủ độc
-# để chặn thẳng (một step enforceable + block).
-ttp T1003 tactic=credential_access severity=9 rarity=0.85
-
-tagger T1003 op=read target_image_base=lsass.exe attr_true=vm_read
-
-pattern lsass_credential_dump scope=same_storyline theta_alert=4 theta_block=6 root_gate=always
-  step T1003_lsass_read bit=0 match=ttp:T1003 seg_window=120000 enforceable block
